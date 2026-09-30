@@ -18,15 +18,12 @@ import cors from 'cors'
 import dotenv from 'dotenv'
 import { buildCorsOptions, getCorsStartupMessage } from './corsConfig.js'
 import Groq from 'groq-sdk'
-import { paymentMiddlewareFromConfig } from '@x402/express'
-import { ExactStellarScheme } from '@x402/stellar/exact/server'
-import { HTTPFacilitatorClient } from '@x402/core/server'
+import { createPaymentMiddleware } from './payment'
 import logger from './logger'
 import {
   STELLAR_NETWORK,
   HORIZON_URL, 
-  AMOUNT_USDC, 
-  AMOUNT_STROOPS 
+  AMOUNT_USDC,
 } from '../src/lib/constants'
 
 dotenv.config()
@@ -63,35 +60,12 @@ app.use(express.json())
 // ─── x402 payment guard on /search ───────────────────────────────────────
 // paymentMiddlewareFromConfig is the recommended API per official Stellar docs.
 // It uses the Coinbase public facilitator (no API key needed for testnet).
-const x402Accepts = [{
-  scheme:  'exact',
-  price:   parseFloat(AMOUNT_USDC),
-  amount:  AMOUNT_STROOPS,
-  network: NETWORK,
-  payTo:   RECEIVING_ADDRESS,
-}]
-
 const x402Routes = {
-  'GET /search': {
-    accepts: x402Accepts,
-    description: `StellarSearch: pay-per-query web search — ${AMOUNT_USDC} USDC on Stellar`,
-  },
-  'GET /images': {
-    accepts: x402Accepts,
-    description: `StellarSearch: pay-per-query image search — ${AMOUNT_USDC} USDC on Stellar`,
-  },
-  'GET /news': {
-    accepts: x402Accepts,
-    description: `StellarSearch: pay-per-query news search — ${AMOUNT_USDC} USDC on Stellar`,
-  },
+  'GET /search': `StellarSearch: pay-per-query web search - ${AMOUNT_USDC} USDC on Stellar`,
+  'GET /images': `StellarSearch: pay-per-query image search - ${AMOUNT_USDC} USDC on Stellar`,
+  'GET /news': `StellarSearch: pay-per-query news search - ${AMOUNT_USDC} USDC on Stellar`,
 }
 
-const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL })
-const schemes = [{ network: NETWORK, server: new ExactStellarScheme() }]
-
-// Apply middleware to all routes, not just /search
-
-// ─── Payment Logging Middleware ──────────────────────────────────────────
 app.use((req, res, next) => {
   if (req.path === '/search') {
     const { q } = req.query as Record<string, string>;
@@ -113,7 +87,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(paymentMiddlewareFromConfig(x402Routes, facilitatorClient, schemes))
+app.use(createPaymentMiddleware(x402Routes))
 
 const MAX_QUERY_LENGTH = 256
 
