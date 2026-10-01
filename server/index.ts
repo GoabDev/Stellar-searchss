@@ -28,6 +28,35 @@ import {
   AMOUNT_STROOPS
 } from '../shared/constants.js'
 
+// Serper.dev response shapes (their API returns untyped JSON)
+interface SerperSearchItem {
+  title?: string
+  link?: string
+  snippet?: string
+  date?: string
+}
+interface SerperSearchResponse { organic?: SerperSearchItem[] }
+
+interface SerperImageItem {
+  title?: string
+  imageUrl?: string
+  thumbnailUrl?: string
+  link?: string
+  imageWidth?: number
+  imageHeight?: number
+}
+interface SerperImagesResponse { images?: SerperImageItem[] }
+
+interface SerperNewsItem {
+  title?: string
+  link?: string
+  snippet?: string
+  source?: string
+  date?: string
+  imageUrl?: string
+}
+interface SerperNewsResponse { news?: SerperNewsItem[] }
+
 dotenv.config()
 
 const app  = express()
@@ -301,7 +330,7 @@ app.get('/search', async (req: Request, res: Response) => {
       return res.status(502).json({ error: `Serper.dev API error: ${serperRes.status}` })
     }
 
-    const data: any = await serperRes.json()
+    const data = (await serperRes.json()) as SerperSearchResponse
     const latencyMs = Date.now() - t0
 
     stats.totalQueries++
@@ -454,7 +483,7 @@ app.get('/images', async (req: Request, res: Response) => {
       return res.status(502).json({ error: `Serper.dev API error: ${serperRes.status}` })
     }
 
-    const data: any = await serperRes.json()
+    const data = (await serperRes.json()) as SerperImagesResponse
     const latencyMs = Date.now() - t0
 
     stats.totalQueries++
@@ -562,7 +591,7 @@ app.get('/news', async (req: Request, res: Response) => {
       return res.status(502).json({ error: `Serper.dev API error: ${serperRes.status}` })
     }
 
-    const data: any = await serperRes.json()
+    const data = (await serperRes.json()) as SerperNewsResponse
     const latencyMs = Date.now() - t0
 
     stats.totalQueries++
