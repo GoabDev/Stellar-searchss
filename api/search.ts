@@ -5,6 +5,9 @@ import { STELLAR_NETWORK, AMOUNT_USDC } from '../src/lib/constants'
 // ─── Config ───────────────────────────────────────────────────────────────
 const NETWORK           = STELLAR_NETWORK as 'stellar:testnet' | 'stellar:mainnet'
 const SERPER_API_KEY    = process.env.SERPER_API_KEY!
+// Keep the upstream local load-test switch; deployed production always pays.
+const PAYMENTS_DISABLED = process.env.NODE_ENV === 'development' &&
+  process.env.VERCEL_ENV !== 'production' && process.env.PAYMENTS_DISABLED === 'true'
 
 interface SerperResult {
   title?: string
@@ -45,12 +48,16 @@ app.use((req, res, next) => {
   next()
 })
 
-app.use(createPaymentMiddleware(Object.fromEntries(
+const paymentMiddleware = createPaymentMiddleware(Object.fromEntries(
   searchPaths.map(path => [
     `GET ${path}`,
     `StellarSearch: pay-per-query web search - ${AMOUNT_USDC} USDC on Stellar`,
   ]),
-)))
+))
+app.use((req, res, next) => {
+  if (PAYMENTS_DISABLED) return next()
+  return paymentMiddleware(req, res, next)
+})
 
 app.get(searchPaths, async (req: Request, res: Response) => {
   const { q, count = '5', freshness } = req.query as Record<string, string>
