@@ -3,7 +3,9 @@
  * StellarSearch MCP Server
  *
  * Exposes tools for Claude Code (and any MCP client):
- *   - web_search:       pays 0.001 USDC via x402, returns Serper.dev results
+ *   - web_search:       queries the x402-priced StellarSearch API (Serper.dev results).
+ *                       This process does not configure a payment signer, so it cannot
+ *                       settle a payment itself and only reports one that the API confirms.
  *   - ai_summarize:     uses Groq to summarise search results
  *   - summarize_url:    fetches a public URL and summarises it with Groq (free)
  *   - check_balance:    reads live USDC balance from Stellar Horizon
@@ -41,7 +43,7 @@ import {
   STELLAR_EXPERT_URL,
   AMOUNT_USDC,
   IS_MAINNET
-} from '../src/lib/constants'
+} from '../shared/constants.js'
 
 dotenv.config()
 
@@ -90,6 +92,27 @@ export function reportToolError(tool: string, error: unknown) {
     content: [{ type: 'text' as const, text: getSafeToolErrorMessage(tool, error) }],
     isError: true,
   }
+}
+
+/**
+ * Render the payment status line for a paid tool result.
+ *
+ * This MCP server does not configure an x402 payer/signer, so it must never
+ * assert that a payment happened just because the upstream endpoint is
+ * x402-priced. A settlement is only reported when the response carries the
+ * facilitator's settlement transaction; otherwise the result says the payment
+ * was not confirmed.
+ */
+export function formatPaymentLine(data: {
+  paidAmount?: string
+  currency?: string
+  network?: string
+  txHash?: string | null
+}): string {
+  if (data.txHash) {
+    return `💰 Paid: ${data.paidAmount} ${data.currency} on ${data.network}`
+  }
+  return '💰 Payment: not confirmed — the StellarSearch API returned no settlement transaction for this request.'
 }
 
 const HEALTH_RESOURCE_URI = 'stellar-search://health'
@@ -297,12 +320,12 @@ const server = new Server(
   { capabilities: { tools: {}, prompts: {}, resources: {} } },
 )
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+// Exported so tests can assert that descriptions match the tools' actual
+// behaviour without spinning up the server.
+export const tools = [
     {
       name: 'web_search',
-      description: `Search the web via StellarSearch. Automatically pays ${AMOUNT_USDC} USDC on Stellar (x402 protocol).
-The server handles the full payment flow: HTTP 402 → sign Soroban auth → settle → return results.
+      description: `Search the web via StellarSearch (Serper.dev results). The upstream endpoint is priced at ${AMOUNT_USDC} USDC per query via x402, but this MCP server does not configure a payment signer, so it cannot settle a payment itself. The call returns results only if StellarSearch settles the request, and a payment is reported only when the response includes a confirmed settlement transaction.
 Use for current events, documentation, research, or anything needing up-to-date web information.`,
       inputSchema: {
         type: 'object',
@@ -316,8 +339,8 @@ Use for current events, documentation, research, or anything needing up-to-date 
     },
     {
       name: 'image_search',
-      description: `Search the web for images via StellarSearch. Automatically pays ${AMOUNT_USDC} USDC on Stellar (x402 protocol).
-Returns image URLs, titles, and source domains via the Serper.dev images API.
+      description: `Search the web for images via StellarSearch (Serper.dev images API). The upstream endpoint is priced at ${AMOUNT_USDC} USDC per query via x402, but this MCP server does not configure a payment signer, so it cannot settle a payment itself. The call returns results only if StellarSearch settles the request, and a payment is reported only when the response includes a confirmed settlement transaction.
+Returns image URLs, titles, and source domains.
 Use for visual references, photos, diagrams, or anything where you need image results.`,
       inputSchema: {
         type: 'object',
@@ -331,8 +354,8 @@ Use for visual references, photos, diagrams, or anything where you need image re
     },
     {
       name: 'news_search',
-      description: `Search recent news articles via StellarSearch. Automatically pays ${AMOUNT_USDC} USDC on Stellar (x402 protocol).
-Returns articles with title, URL, snippet, publication date, and source via the Serper.dev news API.
+      description: `Search recent news articles via StellarSearch (Serper.dev news API). The upstream endpoint is priced at ${AMOUNT_USDC} USDC per query via x402, but this MCP server does not configure a payment signer, so it cannot settle a payment itself. The call returns results only if StellarSearch settles the request, and a payment is reported only when the response includes a confirmed settlement transaction.
+Returns articles with title, URL, snippet, publication date, and source.
 Use for breaking stories, current events, and time-sensitive reporting.`,
       inputSchema: {
         type: 'object',
@@ -417,8 +440,9 @@ Use this tool when an agent needs to audit or report its own spending.`,
         },
       },
     },
-  ],
-}))
+]
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }))
 
 // ─── MCP prompts ──────────────────────────────────────────────────────────
 server.setRequestHandler(ListPromptsRequestSchema, async () => ({
@@ -547,9 +571,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const params = new URLSearchParams({ q: query, count: String(count) })
       if (freshness) params.set('freshness', freshness)
 
-      // The server's x402 middleware handles the full payment flow.
-      // In server-to-server mode the server needs a funded Stellar key.
-      // For MCP usage we call the server which itself holds the paying wallet.
+      // The upstream StellarSearch API enforces x402 on this route. This MCP
+      // process does not configure a payer/signer, so the request is forwarded
+      // as-is: any payment is real only if the API settles it and returns a
+      // settlement transaction, which formatPaymentLine verifies before
+      // reporting a payment to the caller.
       const res = await fetch(`${SERVER_URL}/search?${params}`)
 
       if (!res.ok) {
@@ -567,7 +593,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           type: 'text',
           text: [
             `🔍 Results for: "${query}"`,
-            `💰 Paid: ${data.paidAmount} ${data.currency} on ${data.network}`,
+            formatPaymentLine(data),
             `⚡ Latency: ${data.latencyMs}ms`,
             `📊 ${data.count} results\n`,
             formatted,
@@ -605,7 +631,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           type: 'text',
           text: [
             `🖼️  Image results for: "${query}"`,
-            `💰 Paid: ${data.paidAmount} ${data.currency} on ${data.network}`,
+            formatPaymentLine(data),
             `⚡ Latency: ${data.latencyMs}ms`,
             `📊 ${data.count} results\n`,
             formatted,
@@ -648,7 +674,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           type: 'text',
           text: [
             `📰 News results for: "${query}"`,
-            `💰 Paid: ${data.paidAmount} ${data.currency} on ${data.network}`,
+            formatPaymentLine(data),
             `⚡ Latency: ${data.latencyMs}ms`,
             `📊 ${data.count} results\n`,
             formatted,

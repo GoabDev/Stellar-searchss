@@ -19,6 +19,7 @@
     "deploy": "npm run build && vercel --prod",
     "load-test": "node scripts/load-test.js",
     "test:url": "node --import tsx --test server/urlSummary.test.ts",
+    "test:mcp": "node --import tsx --test mcp-server/index.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
