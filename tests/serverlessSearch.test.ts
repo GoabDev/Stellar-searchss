@@ -137,6 +137,7 @@ test('returns SDK payment requirements when no payment is present', async () => 
   assert.equal(challenge.accepts[0].payTo, recipient)
   assert.equal(challenge.accepts[0].amount, '10000')
   assert.equal(challenge.accepts[0].network, 'stellar:testnet')
+  assert.equal(challenge.accepts[0].asset, 'CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA')
   assert.equal(serperCalls, 0)
 })
 
