@@ -1,25 +1,19 @@
 /**
- * constants.ts
- * Centralized Stellar network constants for Frontend and Backend.
+ * shared/constants.ts
+ * Environment-agnostic Stellar network constants.
  *
- * Browser-facing constants support Vite environment variables. Node runtimes
- * use the matching values in `shared/constants.ts`.
+ * Neutral ground for every runtime in the repo (React frontend, Express
+ * server, MCP server, scripts). This module MUST stay free of
+ * build-tool globals — no `import.meta`, no Vite assumptions — so a plain
+ * `node dist/mcp-server/index.js` can import it directly after a tsc build.
+ *
+ * Environment selection uses `process.env.STELLAR_NETWORK` only:
+ *   - Node processes read it directly.
+ *   - The Vite build inlines `import.meta.env.STELLAR_NETWORK` via
+ *     vite.config.ts `define`, so the browser bundle sees the same value.
  */
 
-// Use process.env for Node.js and import.meta.env for Vite
-const getEnv = (key: string, fallback: string) => {
-  if (typeof process !== 'undefined' && process.env && process.env[key]) {
-    return process.env[key]
-  }
-  // @ts-ignore
-  if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env[`VITE_${key}`]) {
-    // @ts-ignore
-    return import.meta.env[`VITE_${key}`]
-  }
-  return fallback
-}
-
-export const STELLAR_NETWORK = getEnv('STELLAR_NETWORK', 'stellar:testnet')
+export const STELLAR_NETWORK = process.env.STELLAR_NETWORK || 'stellar:testnet'
 export const IS_MAINNET = STELLAR_NETWORK === 'stellar:mainnet'
 export const EXPECTED_WALLET_NETWORK = IS_MAINNET ? 'PUBLIC' : 'TESTNET'
 

@@ -1,7 +1,7 @@
 import { paymentMiddlewareFromConfig } from '@x402/express'
 import { ExactStellarScheme } from '@x402/stellar/exact/server'
 import { HTTPFacilitatorClient, type RoutesConfig } from '@x402/core/server'
-import { AMOUNT_STROOPS, STELLAR_NETWORK, USDC_CONTRACT } from '../src/lib/constants'
+import { AMOUNT_STROOPS, STELLAR_NETWORK, USDC_CONTRACT } from '../shared/constants.js'
 
 export function createPaymentMiddleware(descriptions: Record<string, string>) {
   const network = STELLAR_NETWORK as 'stellar:testnet' | 'stellar:mainnet'
