@@ -18,7 +18,9 @@
     "deploy": "npm run build && vercel --prod",
     "load-test": "node scripts/load-test.js",
     "test:url": "node --import tsx --test server/urlSummary.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:visual": "playwright test",
+    "test:visual:update": "playwright test --update-snapshots"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -45,6 +47,7 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.1",
     "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",

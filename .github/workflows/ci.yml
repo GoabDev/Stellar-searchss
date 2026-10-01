@@ -9,6 +9,7 @@ on:
       - main
 
 jobs:
+  # ── Existing: type-check + unit tests ─────────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -30,3 +31,62 @@ jobs:
 
       - name: Parity test (Express vs serverless)
         run: npx tsx --test tests/parity.test.ts
+
+  # ── New: Playwright visual regression ─────────────────────────────────────
+  visual:
+    name: Visual regression
+    runs-on: ubuntu-latest
+    # Run on every PR and on pushes to main.
+    # The job always uploads the HTML report so reviewers can inspect diffs
+    # even when the job passes (useful for "looks good, approving" context).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        # Only install Chromium — matches playwright.config.ts and keeps the
+        # runner image small.  --with-deps installs OS-level libs (libglib, etc.)
+        run: npx playwright install chromium --with-deps
+
+      - name: Build frontend
+        # playwright.config.ts webServer runs `npm run build && npm run preview`
+        # but we build explicitly here so the step name shows in the job log.
+        run: npm run build
+        env:
+          # Prevent Vite from injecting undefined env vars as "undefined" strings.
+          VITE_SERVER_URL: ''
+          VITE_STELLAR_NETWORK: 'stellar:testnet'
+
+      - name: Run visual tests
+        run: npx playwright test
+        env:
+          CI: 'true'
+
+      # ── Artifacts ──────────────────────────────────────────────────────────
+      # Always upload the HTML report so reviewers can open it in GitHub UI.
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+
+      # Upload diff images only when tests fail so the artifact list stays
+      # clean on green runs.  The diff PNGs live inside test-results/.
+      - name: Upload snapshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-diffs
+          path: test-results/
+          retention-days: 14
