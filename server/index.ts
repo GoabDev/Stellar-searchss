@@ -5,10 +5,12 @@ import express, { Request, Response } from 'express'
 import compression from 'compression'
 import cors from 'cors'
 import dotenv from 'dotenv'
+import helmet from 'helmet'
 import { readFileSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { buildCorsOptions, getCorsStartupMessage } from './corsConfig.js'
+import { createRateLimiter } from './ratelimit.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const { version: APP_VERSION } = JSON.parse(
@@ -19,13 +21,14 @@ import { paymentMiddlewareFromConfig } from '@x402/express'
 import { ExactStellarScheme } from '@x402/stellar/exact/server'
 import { HTTPFacilitatorClient } from '@x402/core/server'
 import logger from './logger'
+import { warnOnMissingFields } from './serperSchema'
 import { fetchPageText, UrlSummaryError } from './urlSummary'
 import {
   STELLAR_NETWORK,
-  HORIZON_URL, 
-  AMOUNT_USDC, 
-  AMOUNT_STROOPS 
-} from '../src/lib/constants'
+  HORIZON_URL,
+  AMOUNT_USDC,
+  AMOUNT_STROOPS
+} from '../shared/constants.js'
 
 dotenv.config()
 
@@ -40,6 +43,27 @@ const stats = {
   startTime: Date.now(),
   cacheHits: 0,
   cacheMisses: 0,
+}
+
+// ─── In-memory receipts ───────────────────────────────────────────────────
+export interface Receipt {
+  id: string
+  timestamp: string      // ISO-8601
+  type: 'search' | 'images' | 'news'
+  query: string
+  amountUsdc: string     // e.g. "0.001"
+  currency: 'USDC'
+  network: string
+  txHash: string | null
+  latencyMs: number
+}
+
+const MAX_RECEIPTS = 500
+export const receipts: Receipt[] = []
+
+export function addReceipt(receipt: Receipt): void {
+  receipts.unshift(receipt)
+  if (receipts.length > MAX_RECEIPTS) receipts.length = MAX_RECEIPTS
 }
 
 // ─── Query Cache ──────────────────────────────────────────────────────────
@@ -110,6 +134,60 @@ app.use(compression({
 }))
 app.use(express.json())
 
+// ─── Content Security Policy ─────────────────────────────────────────────
+// Origins the app actually needs:
+//   - 'self'                 — the app bundle and its own API
+//   - Horizon (STELLAR_NETWORK dependent) — Stellar RPC/Horizon calls
+//   - Serper image CDNs      — remote thumbnails/full images from image search
+//   - Groq API               — AI chat (server-side only, but kept for safety)
+// Inline styles are disallowed; the design must move styles into stylesheets.
+const CSP_DIRECTIVES = {
+  defaultSrc:     ["'self'"],
+  scriptSrc:      ["'self'"],
+  styleSrc:       ["'self'"],
+  imgSrc:         [
+    "'self'",
+    'data:',
+    'https://*.serper.dev',
+    'https://*.googleusercontent.com',
+    'https://*.gstatic.com',
+    'https://*.ggpht.com',
+  ],
+  connectSrc:     [
+    "'self'",
+    HORIZON_URL,
+    'https://*.serper.dev',
+    'https://api.groq.com',
+  ],
+  fontSrc:        ["'self'", 'data:'],
+  objectSrc:      ["'none'"],
+  baseUri:        ["'self'"],
+  frameAncestors: ["'none'"],
+  formAction:     ["'self'"],
+  upgradeInsecureRequests: [],
+}
+
+// Start in report-only mode; flip to enforce via CSP_ENFORCE=1 once the
+// violation reports are clean.
+const cspEnforced = process.env.CSP_ENFORCE === '1'
+app.use(
+  helmet({
+    contentSecurityPolicy: cspEnforced
+      ? { useDefaults: false, directives: CSP_DIRECTIVES }
+      : { useDefaults: false, directives: CSP_DIRECTIVES, reportOnly: true },
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  }),
+)
+
+// ─── Rate limiting (free, cost-bearing endpoints) ─────────────────────────
+// /ai/chat and /summarize-url are free but each triggers a Groq call (and the
+// latter a network fetch), so they are the abuse-prone surface. Limits are
+// keyed per client IP so one caller cannot starve the rest.
+const freeRouteLimiter = createRateLimiter({
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60_000,
+  max: Number(process.env.RATE_LIMIT_MAX) || 30,
+})
 // ─── x402 payment guard on /search ───────────────────────────────────────
 // paymentMiddlewareFromConfig is the recommended API per official Stellar docs.
 // It uses the Coinbase public facilitator (no API key needed for testnet).
@@ -270,7 +348,8 @@ app.get('/search', async (req: Request, res: Response) => {
       return res.status(502).json({ error: `Serper.dev API error: ${serperRes.status}` })
     }
 
-    const data = await serperRes.json()
+const data: any = await serperRes.json()
+    warnOnMissingFields('search', data, ['organic'])
     const latencyMs = Date.now() - t0
 
     stats.totalQueries++
@@ -278,6 +357,7 @@ app.get('/search', async (req: Request, res: Response) => {
     stats.latencies.push(latencyMs)
     if (stats.latencies.length > 200) stats.latencies.shift()
 
+    warnOnMissingFields('search.organic', data.organic, ['title', 'link', 'snippet'])
     const results = (data.organic || []).map((r: any, i: number) => ({
       id: String(i + 1),
       title: r.title || 'No title',
@@ -348,6 +428,18 @@ app.get('/search', async (req: Request, res: Response) => {
 
     queryCache.set(cacheKey, { data: responseData, timestamp: Date.now() })
 
+    addReceipt({
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      type: 'search',
+      query: cleanQ,
+      amountUsdc: AMOUNT_USDC,
+      currency: 'USDC',
+      network: NETWORK,
+      txHash,
+      latencyMs,
+    })
+
     return res.json(responseData)
   } catch (err: any) {
     console.error('[search error]', err.message)
@@ -411,7 +503,8 @@ app.get('/images', async (req: Request, res: Response) => {
       return res.status(502).json({ error: `Serper.dev API error: ${serperRes.status}` })
     }
 
-    const data = await serperRes.json()
+const data: any = await serperRes.json()
+    warnOnMissingFields('images', data, ['images'])
     const latencyMs = Date.now() - t0
 
     stats.totalQueries++
@@ -419,6 +512,7 @@ app.get('/images', async (req: Request, res: Response) => {
     stats.latencies.push(latencyMs)
     if (stats.latencies.length > 200) stats.latencies.shift()
 
+    warnOnMissingFields('images.images', data.images, ['title', 'imageUrl', 'link', 'imageWidth', 'imageHeight'])
     const results = (data.images || []).map((r: any, i: number) => ({
       id: String(i + 1),
       title: r.title || 'No title',
@@ -444,6 +538,18 @@ app.get('/images', async (req: Request, res: Response) => {
     }
 
     queryCache.set(cacheKey, { data: responseData, timestamp: Date.now() })
+
+    addReceipt({
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      type: 'images',
+      query: cleanQ,
+      amountUsdc: AMOUNT_USDC,
+      currency: 'USDC',
+      network: NETWORK,
+      txHash,
+      latencyMs,
+    })
 
     return res.json(responseData)
   } catch (err: any) {
@@ -507,7 +613,8 @@ app.get('/news', async (req: Request, res: Response) => {
       return res.status(502).json({ error: `Serper.dev API error: ${serperRes.status}` })
     }
 
-    const data = await serperRes.json()
+const data: any = await serperRes.json()
+    warnOnMissingFields('news', data, ['news'])
     const latencyMs = Date.now() - t0
 
     stats.totalQueries++
@@ -515,6 +622,7 @@ app.get('/news', async (req: Request, res: Response) => {
     stats.latencies.push(latencyMs)
     if (stats.latencies.length > 200) stats.latencies.shift()
 
+    warnOnMissingFields('news.news', data.news, ['title', 'link', 'snippet', 'source', 'date'])
     const results = (data.news || []).map((r: any, i: number) => ({
       id: String(i + 1),
       title: r.title || 'No title',
@@ -540,6 +648,18 @@ app.get('/news', async (req: Request, res: Response) => {
 
     queryCache.set(cacheKey, { data: responseData, timestamp: Date.now() })
 
+    addReceipt({
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      type: 'news',
+      query: cleanQ,
+      amountUsdc: AMOUNT_USDC,
+      currency: 'USDC',
+      network: NETWORK,
+      txHash,
+      latencyMs,
+    })
+
     return res.json(responseData)
   } catch (err: any) {
     console.error('[news error]', err.message)
@@ -551,7 +671,7 @@ app.get('/news', async (req: Request, res: Response) => {
 // Streams responses as Server-Sent Events when the client sends
 // `Accept: text/event-stream`; otherwise returns the full completion as JSON
 // (back-compat fallback for callers that don't support SSE).
-app.post('/ai/chat', async (req: Request, res: Response) => {
+app.post('/ai/chat', freeRouteLimiter, async (req: Request, res: Response) => {
   const { messages } = req.body as {
     messages: { role: 'system' | 'user' | 'assistant'; content: string }[]
   }
@@ -603,9 +723,15 @@ app.post('/ai/chat', async (req: Request, res: Response) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`)
   }
 
-  // Abort the Groq stream if the client disconnects mid-response.
+  // Abort the Groq stream if the client disconnects mid-response. The
+  // request's 'close' event fires as soon as its body is consumed, so
+  // disconnects are detected on the response instead: ServerResponse emits
+  // 'close' with writableEnded === false only when the client went away
+  // before the response completed.
   const controller = new AbortController()
-  req.on('close', () => controller.abort())
+  res.on('close', () => {
+    if (!res.writableEnded) controller.abort()
+  })
 
   try {
     const stream = await groq.chat.completions.create(
@@ -639,7 +765,7 @@ app.post('/ai/chat', async (req: Request, res: Response) => {
 // link-local addresses are refused, including via redirects and DNS rebinding.
 const MAX_INSTRUCTION_LENGTH = 200
 
-app.post('/summarize-url', async (req: Request, res: Response) => {
+app.post('/summarize-url', freeRouteLimiter, async (req: Request, res: Response) => {
   const { url, instruction } = (req.body ?? {}) as { url?: unknown; instruction?: unknown }
 
   let task = 'Summarise the page in a few short paragraphs, then list the key points.'
@@ -697,6 +823,52 @@ app.post('/summarize-url', async (req: Request, res: Response) => {
   }
 })
 
+// ─── GET /receipts ────────────────────────────────────────────────────────
+// Returns the in-memory paid-query receipts, optionally filtered to a date
+// range via ISO-8601 `from` and `to` query parameters.  Also returns a
+// `totalSpent` summary so an agent can report its own costs without having
+// to sum the amounts itself.
+app.get('/receipts', (req: Request, res: Response) => {
+  const { from, to, limit: limitParam } = req.query as Record<string, string>
+
+  let filtered = receipts
+
+  if (from) {
+    const fromMs = Date.parse(from)
+    if (isNaN(fromMs)) {
+      return res.status(400).json({ error: '`from` must be a valid ISO-8601 date string' })
+    }
+    filtered = filtered.filter((r) => Date.parse(r.timestamp) >= fromMs)
+  }
+
+  if (to) {
+    const toMs = Date.parse(to)
+    if (isNaN(toMs)) {
+      return res.status(400).json({ error: '`to` must be a valid ISO-8601 date string' })
+    }
+    filtered = filtered.filter((r) => Date.parse(r.timestamp) <= toMs)
+  }
+
+  if (limitParam !== undefined) {
+    const n = parseInt(limitParam, 10)
+    if (isNaN(n) || n < 1) {
+      return res.status(400).json({ error: '`limit` must be a positive integer' })
+    }
+    filtered = filtered.slice(0, n)
+  }
+
+  const totalSpentUsdc = filtered
+    .reduce((sum, r) => sum + parseFloat(r.amountUsdc), 0)
+    .toFixed(6)
+
+  return res.json({
+    receipts: filtered,
+    count: filtered.length,
+    totalSpentUsdc,
+    currency: 'USDC',
+  })
+})
+
 // ─── GET /health ──────────────────────────────────────────────────────────
 app.get('/health', (req: Request, res: Response) => {
   const avg = stats.latencies.length
@@ -752,13 +924,14 @@ app.get('/', (_req: Request, res: Response) => {
       'GET /news?q=<query>':   '0.001 USDC via x402 — news articles',
       'POST /ai/chat':         'Groq AI — free',
       'POST /summarize-url':   'Fetch a public URL and summarise it with Groq — free',
+      'GET /receipts':         'List past paid-query receipts with total-spent summary',
       'GET /health':           'Live server stats',
     },
   })
 })
 
 // ─── Start ────────────────────────────────────────────────────────────────
-if (process.env.NODE_ENV !== 'production') {
+if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
     console.log(`\n🚀 StellarSearch on http://localhost:${PORT}`)
     console.log(`   Network:     ${NETWORK}`)

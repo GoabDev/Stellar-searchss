@@ -17,6 +17,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -34,6 +35,7 @@ import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { pathToFileURL } from 'node:url'
 import { StrKey } from '@stellar/stellar-sdk'
+import http from 'node:http'
 import { 
   HORIZON_URL, 
   USDC_ISSUER, 
@@ -52,6 +54,11 @@ const { version: APP_VERSION } = JSON.parse(
 
 const SERVER_URL = process.env.SEARCH_API_URL || 'http://localhost:3001'
 const GROQ_API_KEY = process.env.GROQ_API_KEY!
+
+const TRANSPORT = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase()
+const HTTP_PORT = parseInt(process.env.MCP_HTTP_PORT || '3002', 10)
+const HTTP_HOST = process.env.MCP_HTTP_HOST || '0.0.0.0'
+const HTTP_AUTH_TOKEN = process.env.MCP_HTTP_AUTH_TOKEN
 
 const groq = new Groq({ apiKey: GROQ_API_KEY })
 
@@ -393,6 +400,30 @@ Prefer reading the ${HEALTH_RESOURCE_URI} resource if your client supports resou
         properties: {},
       },
     },
+    {
+      name: 'list_receipts',
+      description: `List past paid queries recorded by the StellarSearch server.
+Each receipt contains the query type (search/images/news), timestamp, amount paid in USDC, and the Stellar transaction hash.
+The response also includes a \`totalSpentUsdc\` summary across all returned receipts.
+Use this tool when an agent needs to audit or report its own spending.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          from: {
+            type: 'string',
+            description: 'ISO-8601 start of date range (inclusive), e.g. "2026-01-01T00:00:00Z"',
+          },
+          to: {
+            type: 'string',
+            description: 'ISO-8601 end of date range (inclusive), e.g. "2026-12-31T23:59:59Z"',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of receipts to return (default: all within range, max 500)',
+          },
+        },
+      },
+    },
   ],
 }))
 
@@ -529,11 +560,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const res = await fetch(`${SERVER_URL}/search?${params}`)
 
       if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
+        const e: any = await res.json().catch(() => ({}))
         throw new Error(e.error || `HTTP ${res.status}`)
       }
 
-      const data = await res.json()
+      const data: any = await res.json()
       const formatted = data.results
         .map((r: any, i: number) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description}`)
         .join('\n\n')
@@ -756,6 +787,83 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
+  // ── list_receipts ─────────────────────────────────────────────────────
+  if (name === 'list_receipts') {
+    const { from, to, limit } = args as { from?: string; to?: string; limit?: number }
+
+    try {
+      const params = new URLSearchParams()
+      if (from)  params.set('from',  from)
+      if (to)    params.set('to',    to)
+      if (limit) params.set('limit', String(Math.floor(limit)))
+
+      const url = `${SERVER_URL}/receipts${params.toString() ? `?${params}` : ''}`
+      const res = await fetch(url)
+
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({})) as { error?: string }
+        throw new Error(e.error || `HTTP ${res.status}`)
+      }
+
+      const data = await res.json() as {
+        receipts: Array<{
+          id: string
+          timestamp: string
+          type: string
+          query: string
+          amountUsdc: string
+          currency: string
+          network: string
+          txHash: string | null
+          latencyMs: number
+        }>
+        count: number
+        totalSpentUsdc: string
+        currency: string
+      }
+
+      if (data.count === 0) {
+        const rangeNote = from || to
+          ? ` in the specified date range${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}`
+          : ''
+        return {
+          content: [{
+            type: 'text',
+            text: `📋 No paid-query receipts found${rangeNote}.\nThe server records receipts in memory while it is running; they reset on restart.`,
+          }],
+        }
+      }
+
+      const lines: string[] = [
+        `📋 Paid-Query Receipts (${data.count} shown)`,
+        `💸 Total spent: ${data.totalSpentUsdc} ${data.currency}`,
+        ...(from || to
+          ? [`📅 Date range: ${from ?? '(start)'}  →  ${to ?? '(now)'}`]
+          : []),
+        '',
+      ]
+
+      for (const r of data.receipts) {
+        const typeIcon = r.type === 'images' ? '🖼️' : r.type === 'news' ? '📰' : '🔍'
+        const txLine = r.txHash
+          ? `   Tx:        ${r.txHash}`
+          : `   Tx:        (not available)`
+        lines.push(
+          `${typeIcon} [${r.timestamp}] ${r.type.toUpperCase()}`,
+          `   Query:     "${r.query}"`,
+          `   Paid:      ${r.amountUsdc} ${r.currency} on ${r.network}`,
+          txLine,
+          `   Latency:   ${r.latencyMs}ms`,
+          '',
+        )
+      }
+
+      return { content: [{ type: 'text', text: lines.join('\n') }] }
+    } catch (err: any) {
+      return reportToolError('list_receipts', err)
+    }
+  }
+
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true }
 })
 
@@ -798,7 +906,68 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 })
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const transport = new StdioServerTransport()
-  await server.connect(transport)
-  console.error('StellarSearch MCP server started')
+  // ─── Transport selection ──────────────────────────────────────────────────
+  if (TRANSPORT === 'http' || TRANSPORT === 'sse') {
+    // HTTP + SSE transport for hosted deployments.
+    // Clients connect via GET /sse (event stream) and POST /messages (JSON-RPC).
+    // Optional bearer-token auth via MCP_HTTP_AUTH_TOKEN.
+    const sessions = new Map<string, SSEServerTransport>()
+
+    const checkAuth = (req: http.IncomingMessage): boolean => {
+      if (!HTTP_AUTH_TOKEN) return true
+      const header = req.headers['authorization'] || ''
+      const token = Array.isArray(header) ? header[0] : header
+      return token === `Bearer ${HTTP_AUTH_TOKEN}`
+    }
+
+    const httpServer = http.createServer(async (req, res) => {
+      const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
+
+      if (!checkAuth(req)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Unauthorized' }))
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/sse') {
+        const transport = new SSEServerTransport('/messages', res)
+        sessions.set(transport.sessionId, transport)
+        res.on('close', () => sessions.delete(transport.sessionId))
+        await server.connect(transport)
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/messages') {
+        const sessionId = url.searchParams.get('sessionId') || ''
+        const transport = sessions.get(sessionId)
+        if (!transport) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Session not found' }))
+          return
+        }
+        await transport.handlePostMessage(req, res)
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ status: 'ok', transport: 'http', sessions: sessions.size }))
+        return
+      }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Not found' }))
+    })
+
+    httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
+      console.error(`StellarSearch MCP server started (HTTP+SSE) on http://${HTTP_HOST}:${HTTP_PORT}`)
+      console.error(`  SSE endpoint:      GET  /sse`)
+      console.error(`  Messages endpoint: POST /messages?sessionId=<id>`)
+      console.error(`  Auth:              ${HTTP_AUTH_TOKEN ? 'bearer token required' : 'disabled'}`)
+    })
+  } else {
+    const transport = new StdioServerTransport()
+    await server.connect(transport)
+    console.error('StellarSearch MCP server started (stdio)')
+  }
 }

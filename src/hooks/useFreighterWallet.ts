@@ -12,7 +12,7 @@ import {
   getNetwork,
 } from '@stellar/freighter-api'
 import { Horizon } from '@stellar/stellar-sdk'
-import { HORIZON_URL, USDB_ISSUER } from '../lib/stellar'
+import { HORIZON_URL, USDK_ISSUER } from '../lib/stellar'
 
 export interface WalletState {
   publicKey: string | null
@@ -20,7 +20,14 @@ export interface WalletState {
   network: string
   xlmBalance: string
   usdcBalance: string
+  /**
+   * Whether the account holds a trustline for the configured USDC issuer.
+   * `null` means the trustline state has not been determined yet
+   * (e.g. before the first balance fetch completes).
+   */
+  usdcTrustline: boolean | null
   loading: boolean
+  refreshing: boolean
   error: string | null
   hint: string | null
 }
@@ -38,8 +45,54 @@ export interface StellarTransaction {
 }
 
 export const DEFAULT_TX_PAGE_SIZE = 15
+const horizon = new Horizon.Server(NORIZON_URL)
 
-const horizon = new Horizon.Server(HORIZON_URL)
+export const horizon = new Horizon.Server(HORIZON_URL)
+
+const MAX_RETRIES = 4
+const BASE_DELAY_MS = 1000
+const BALANCE_CACHE_TTL_MS = 5000
+
+const balanceCache = new Map<string, { xlm: string; usdc: string; ts: number }>()
+
+function isRateLimitError(err: any): boolean {
+  if (!err) return false
+  if (err.response?.status === 429) return true
+  if (err.status === 429) return true
+  return false
+}
+
+function getRetryAfterMs(err: any): number | null {
+  const headers = err?.response?.headers
+  if (!headers) return null
+  const raw =
+    typeof headers.get === 'function'
+      ? headers.get('retry-after')
+      : headers['retry-after']
+  if (!raw) return null
+  const seconds = parseInt(raw, 10)
+  if (Number.isNaN(seconds)) return null
+  return seconds * 1000
+}
+
+async function withBackoff<T>(fn: () => Promise<T>): Promise<T> {
+  let attempt = 0
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await fn()
+    } catch (err: any) {
+      if (!isRateLimitError(err) || attempt >= MAX_RETRIES) {
+        throw err
+      }
+      const retryAfter = getRetryAfterMs(err)
+      const delay =
+        retryAfter ?? BASE_DELAY_MS * Math.pow(2, attempt)
+      await new Promise(resolve => setTimeout(resolve, delay))
+      attempt += 1
+    }
+  }
+}
 
 function mapOperation(op: any): StellarTransaction {
   return {
@@ -57,7 +110,6 @@ function mapOperation(op: any): StellarTransaction {
     memo: op.transaction?.memo,
   }
 }
-
 export function useFreighterWallet() {
   const [wallet, setWallet] = useState<WalletState>({
     publicKey: null,
@@ -65,7 +117,9 @@ export function useFreighterWallet() {
     network: 'TESTNET',
     xlmBalance: '0',
     usdcBalance: '0',
+    usdcTrustline: null,
     loading: false,
+    refreshing: false,
     error: null,
     hint: null,
   })
@@ -74,34 +128,56 @@ export function useFreighterWallet() {
   const [txLoadingMore, setTxLoadingMore] = useState(false)
   const [txCursor, setTxCursor] = useState<string | null>(null)
   const [txHasMore, setTxHasMore] = useState(false)
+  const [transactionError, setTransactionError] = useState<string | null>(null)
 
   // Fetch real balances from Horizon
   const fetchBalances = useCallback(async (publicKey: string) => {
     try {
-      const account = await horizon.loadAccount(publicKey)
+      const cached = balanceCache.get(publicKey)
+      if (cached && Date.now() - cached.ts < BALANCE_CACHE_TTL_MS) {
+        return
+      }
+
+      const account = await withBackoff(() => horizon.loadAccount(publicKey))
 
       let xlm = '0'
       let usdc = '0'
+      // Distinguish "no trustline" from "trustline with zero balance".
+      // Without a trustline the account cannot receive USDC at all.
+      let hasUsddTrustline = false
 
       for (const balance of account.balances) {
         if (balance.asset_type === 'native') {
           xlm = parseFloat(balance.balance).toFixed(4)
         } else if (
-          balance.asset_type === 'credit_alphanum4' &&
-          (balance as any).asset_code === 'USDC' &&
-          (balance as any).asset_issuer === USDB_ISSUER
+          balance.asset_type === 'credit_alphanum4' ||
+          balance.asset_type === 'credit_alphanum12'
         ) {
-          usdc = parseFloat(balance.balance).toFixed(6)
+          const credit = balance as any
+          if (credit.asset_code === 'USDC' && credit.asset_issuer === USDK_ISSUER) {
+            hasUsddTrustline = true
+            usdc = parseFloat(credit.balance).toFixed(6)
+          }
         }
       }
+
+      balanceCache.set(publicKey, { xlm, usdc, ts: Date.now() })
 
       setWallet(prev => ({
         ...prev,
         xlmBalance: xlm,
         usdcBalance: usdc,
+        usddTrustline: hasUsddTrustline,
         error: null,
       }))
     } catch (err: any) {
+      if (isRateLimitError(err)) {
+        setWallet(prev => ({
+          ...prev,
+          error: 'Rate limited, retrying…',
+        }))
+        return
+      }
       setWallet(prev => ({
         ...prev,
         error: err.message || 'Failed to load account',
@@ -109,17 +185,37 @@ export function useFreighterWallet() {
     }
   }, [])
 
-  // Fetch real transaction history from Horizon (first page)
+// Fetch real transaction history from Horizon (first page)
   const fetchTransactions = useCallback(
     async (publicKey: string, pageSize: number = DEFAULT_TX_PAGE_SIZE) => {
       setTxLoading(true)
+      setTransactionError(null)
       try {
-        const ops = await horizon
-          .operations()
-          .forAccount(publicKey)
-          .order('desc')
-          .limit(pageSize)
-          .call()
+        const ops = await withBackoff(() =>
+          horizon
+            .operations()
+            .forAccount(publicKey)
+            .order('desc')
+            .limit(pageSize)
+            .call()
+        )
+
+        const txs: StellarTransaction[] = ops.records
+          .filter((op: any) => op.type === 'payment' || op.type === 'create_account')
+          .map((op: any) => ({
+            id: op.id,
+            hash: op.transaction_hash,
+            type: op.type,
+            amount: op.amount ? parseFloat(op.amount).toFixed(4) : '—',
+            asset:
+              op.asset_type === 'native'
+                ? 'XLM'
+                : op.asset_code || 'Unknown',
+            from: op.from || op.funder || '',
+            to: op.to || op.account || '',
+            timestamp: op.created_at,
+            memo: op.transaction?.memo,
+          }))
 
         const txs = ops.records
           .filter((op: any) => op.type === 'payment' || op.type === 'create_account')
@@ -128,10 +224,11 @@ export function useFreighterWallet() {
         setTransactions(txs)
         setTxCursor(ops.records.length > 0 ? ops.records[ops.records.length - 1].paging_token : null)
         setTxHasMore(ops.records.length === pageSize)
-      } catch (_) {
-        setTransactions([])
-        setTxCursor(null)
-        setTxHasMore(false)
+      } catch (err: any) {
+        if (!isRateLimitError(err)) {
+          console.error('Failed to load transactions:', err)
+          setTransactionError('Could not load transactions. Please try again.')
+        }
       } finally {
         setTxLoading(false)
       }
@@ -169,15 +266,25 @@ export function useFreighterWallet() {
 ...prev, ...nextTxs])
         setTxCursor(ops.records[ops.records.length - 1].paging_token)
         setTxHasMore(ops.records.length === pageSize)
-      } catch (_) {
-        // Keep existing transactions on failure and stop further paging attempts
-        setTxHasMore(false)
+      } catch (err: any) {
+        if (!isRateLimitError(err)) {
+          console.error('Failed to load more transactions:', err)
+          setTransactionError('Could not load transactions. Please try again.')
+          // Keep existing transactions on failure and stop further paging attempts
+          setTxHasMore(false)
+        }
       } finally {
         setTxLoadingMore(false)
       }
     },
     [txCursor, txHasMore, txLoadingMore]
   )
+
+  // Run both Horizon fetches concurrently. Use allSettled so a
+  // failure in one does not discard the other's result.
+  const fetchWalletData = useCallback(async (publicKey: string) => {
+    await Promise.allSettled([fetchBalances(publicKey), fetchTransactions(publicKey)])
+  }, [fetchBalances, fetchTransactions])
 
   // Connect Freighter wallet
   const connect = useCallback(async () => {
@@ -213,9 +320,8 @@ export function useFreighterWallet() {
         error: null,
       }))
 
-      // Fetch live data after connect
-      await fetchBalances(addressResult.address)
-      await fetchTransactions(addressResult.address)
+      // Fetch live data after connect (balances + transactions in parallel)
+      await fetchWalletData(addressResult.address)
     } catch (err: any) {
       setWallet(prev => ({
         ...prev,
@@ -225,7 +331,7 @@ export function useFreighterWallet() {
         hint: err.message || 'Connection failed. Please check Freighter and try again.',
       }))
     }
-  }, [fetchBalances, fetchTransactions])
+  }, [fetchWalletData])
 
   const disconnect = useCallback(() => {
     setWallet({
@@ -234,7 +340,9 @@ export function useFreighterWallet() {
       network: 'TESTNET',
       xlmBalance: '0',
       usdcBalance: '0',
+      usdcTrustline: null,
       loading: false,
+      refreshing: false,
       error: null,
       hint: null,
     })
@@ -244,19 +352,36 @@ export function useFreighterWallet() {
   }, [])
 
   const refresh = useCallback(async () => {
-    if (wallet.publicKey) {
-      await fetchBalances(wallet.publicKey)
-      await fetchTransactions(wallet.publicKey)
+if (!wallet.publicKey) return
+    setWallet(prev => ({ ...prev, refreshing: true }))
+    try {
+      await fetchWalletData(wallet.publicKey)
+    } finally {
+      setWallet(prev => ({ ...prev, refreshing: false }))
     }
-  }, [wallet.publicKey, fetchBalances, fetchTransactions])
+    }
+  }, [wallet.publicKey, fetchWalletData])
 
   // Auto-check if already connected on mount
   useEffect(() => {
     const check = async () => {
       try {
         const connected = await isConnected()
-        if (connected.error) {
+if (connected.error) {
           throw new Error(connected.error.message)
+        }
+        if (connected.isConnected) {
+          const addr = await getAddress()
+          if (addr.address) {
+            const net = await getNetwork()
+            setWallet(prev => ({
+              ...prev,
+              publicKey: addr.address,
+              connected: true,
+              network: net.network || 'TESTNET',
+            }))
+            fetchWalletData(addr.address)
+          }
         }
         if (!connected.isConnected) return
 
@@ -287,12 +412,13 @@ export function useFreighterWallet() {
       }
     }
     check()
-  }, [fetchBalances, fetchTransactions])
+  }, [fetchWalletData])
 
   return {
     wallet,
     transactions,
     txLoading,
+    transactionError,
     txLoadingMore,
     txHasMore,
     loadMoreTransactions,
