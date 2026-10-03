@@ -55,7 +55,7 @@ const { version: APP_VERSION } = JSON.parse(
 )
 
 const SERVER_URL = process.env.SEARCH_API_URL || 'http://localhost:3001'
-const GROQ_API_KEY = process.env.GROQ_API_KEY!
+const GROQ_API_KEY = process.env.GROQ_API_KEY || ''
 
 const TRANSPORT = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase()
 const HTTP_PORT = parseInt(process.env.MCP_HTTP_PORT || '3002', 10)
@@ -322,7 +322,7 @@ function balanceMessage(address: string, account: HorizonAccount): string {
   return lines.join('\n')}
 
 // ─── MCP server ───────────────────────────────────────────────────────────
-const server = new Server(
+export const server = new Server(
   { name: 'stellar-search', version: APP_VERSION },
   { capabilities: { tools: {}, prompts: {}, resources: {} } },
 )
@@ -449,7 +449,8 @@ Use this tool when an agent needs to audit or report its own spending.`,
     },
 ]
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }))
+export const listToolsHandler = async () => ({ tools })
+server.setRequestHandler(ListToolsRequestSchema, listToolsHandler)
 
 // ─── MCP prompts ──────────────────────────────────────────────────────────
 server.setRequestHandler(ListPromptsRequestSchema, async () => ({
@@ -567,12 +568,12 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   throw new Error(`Unknown prompt: ${name}`)
 })
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+export const callToolHandler = async (request: any) => {
   const { name, arguments: args } = request.params
 
   // ── web_search ────────────────────────────────────────────────────────
   if (name === 'web_search') {
-    const { query, count = 5, freshness } = args as { query: string; count?: number; freshness?: string }
+    const { query, count = 5, freshness } = (args || {}) as { query: string; count?: number; freshness?: string }
 
     try {
       const params = new URLSearchParams({ q: query, count: String(count) })
@@ -597,7 +598,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       return {
         content: [{
-          type: 'text',
+          type: 'text' as const,
           text: [
             `🔍 Results for: "${query}"`,
             formatPaymentLine(data),
@@ -629,13 +630,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       const data: any = await res.json()
-      const formatted = data.results
+      const formatted = (data.results || [])
         .map((r: any, i: number) => `${i + 1}. **${r.title}**\n   Image: ${r.imageUrl}\n   Source: ${r.sourceUrl} (${r.source})`)
         .join('\n\n')
 
       return {
         content: [{
-          type: 'text',
+          type: 'text' as const,
           text: [
             `🖼️  Image results for: "${query}"`,
             formatPaymentLine(data),
@@ -652,7 +653,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // ── news_search ───────────────────────────────────────────────────────
   if (name === 'news_search') {
-    const { query, count = 10, freshness } = args as {
+    const { query, count = 10, freshness } = (args || {}) as {
       query: string; count?: number; freshness?: string
     }
 
@@ -669,7 +670,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       const data: any = await res.json()
-      const formatted = data.results
+      const formatted = (data.results || [])
         .map((r: any, i: number) => {
           const date = r.publishedAt ? ` · ${r.publishedAt}` : ''
           return `${i + 1}. **${r.title}** (${r.source}${date})\n   ${r.url}\n   ${r.snippet}`
@@ -678,7 +679,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       return {
         content: [{
-          type: 'text',
+          type: 'text' as const,
           text: [
             `📰 News results for: "${query}"`,
             formatPaymentLine(data),
@@ -695,7 +696,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // ── ai_summarize ──────────────────────────────────────────────────────
   if (name === 'ai_summarize') {
-    const { text, instruction = 'summarise' } = args as { text: string; instruction?: string }
+    const { text, instruction = 'summarise' } = (args || {}) as { text: string; instruction?: string }
 
     try {
       const completion = await groq.chat.completions.create({
@@ -709,7 +710,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       })
 
       const content = completion.choices[0]?.message?.content || 'No response.'
-      return { content: [{ type: 'text', text: content }] }
+      return { content: [{ type: 'text' as const, text: content }] }
     } catch (err: any) {
       return reportToolError('AI summary', err)
     }
@@ -890,8 +891,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
-  return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true }
-})
+  return { content: [{ type: 'text' as const, text: `Unknown tool: ${name}` }], isError: true }
+}
+server.setRequestHandler(CallToolRequestSchema, callToolHandler)
 
 // ─── Resources ────────────────────────────────────────────────────────────
 // Server stats are reference data, so a client can list and read them directly
