@@ -20,9 +20,9 @@ interface Props {
   onRefresh: () => void
   transactionError?: string | null
   onRetryTransactions?: () => void
-  hasMore: boolean
-  onLoadMore: () => void
-  loadingMore: boolean
+  hasMore?: boolean
+  onLoadMore?: () => void
+  loadingMore?: boolean
 }
 
 export function DashboardPage({ transactions, txLoading, publicKey, usdcBalance, xlmBalance, onRefresh, transactionError, onRetryTransactions, hasMore = false, onLoadMore = () => {}, loadingMore = false }: Props) {
