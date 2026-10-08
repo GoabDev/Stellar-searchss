@@ -110,7 +110,6 @@ export function SearchPage({ wallet, onConnectWallet, session, search, reset, re
       <AnimatePresence>
         {session.status === 'idle' && (
           <SearchSuggestions onSelect={handleSearch} />
-          <SearchResults results={[]} query="" />
         )}
       </AnimatePresence>
 

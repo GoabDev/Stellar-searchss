@@ -59,15 +59,15 @@ src/pages/DocsPage.tsx             # fix wording in the docs copy
 That is a real, PR-able contribution. Confirm it still typechecks before opening a PR:
 
 ```bash
-npx tsc --noEmit
+npm run typecheck
 ```
 
 ### 5. What you can (and cannot) do without a wallet
 
 | ✅ Works with no wallet | ⛔ Needs Freighter + funded testnet USDC |
 |---|---|
-| Everything in `src/` — pages, components, styling, copy, layout | `/search` (the 0.001 USDC paid route) and anything that calls it |
-| `npm run setup`, `npm run dev`, `npm run build`, `npx tsc --noEmit` | `src/hooks/useSearch.ts`, `src/hooks/useFreighterWallet.ts`, `src/components/wallet/WalletPanel.tsx` |
+| Everything in `src/` — pages, components, hooks, styling, copy, layout | `/search` (the 0.001 USDC paid route) and anything that calls it |
+| `npm run setup`, `npm run dev`, `npm run build`, `npm run typecheck` | `src/hooks/useSearch.ts`, `src/hooks/useFreighterWallet.ts`, `src/components/wallet/WalletPanel.tsx` |
 | `npm run test:search` — it signs no payment, it asserts the `402` | MCP tools — `web_search` pays via x402 |
 | `GET /health`, `GET /ai/chat`, docs, README, CONTRIBUTING, issue triage | `src/pages/DashboardPage.tsx` (reads live Horizon tx history) |
 
@@ -330,7 +330,7 @@ git checkout -b fix/freighter-rejection-loop
 
 - Keep changes focused — one concern per PR.
 - Follow the [coding standards](#coding-standards) below.
-- Run the typecheck frequently: `npx tsc --noEmit`.
+- Run the typecheck frequently: `npm run typecheck`.
 
 ### Commit messages
 
@@ -382,7 +382,7 @@ docs: add CONTRIBUTING.md
    - **Screenshots** — required for any UI change.
 
 4. Make sure:
-   - [ ] `npx tsc --noEmit` passes with no errors.
+   - [ ] `npm run typecheck` passes with no errors.
    - [ ] The app starts and the affected feature works manually.
    - [ ] No new `console.log` / debug statements left in.
    - [ ] No secrets or `.env` values committed.
@@ -506,111 +506,18 @@ For UI changes:
 - [ ] No horizontal scroll at any breakpoint.
 - [ ] Light and dark mode look acceptable (if theme toggle exists).
 
-### Visual regression tests
-
-StellarSearch uses Playwright screenshot comparison to catch unintended visual
-changes to the key pages (Search, Docs, Dashboard). The tests live in
-`e2e/visual.spec.ts`; baseline images are stored in `e2e/snapshots/` and
-committed to the repository.
-
-#### Prerequisites
-
-Install the Playwright browser the first time (takes ~200 MB):
+### Running the typecheck
 
 ```bash
-npx playwright install chromium --with-deps
+# Check all TypeScript errors across the app, server, MCP server and
+# scripts (does not emit files). CI runs this on every PR.
+npm run typecheck
 ```
 
-#### Running the tests
-
-```bash
-# Run all visual tests (builds the app first via vite preview)
-npm run test:visual
-
-# Open the HTML report after a run
-npx playwright show-report
-```
-
-The test suite captures **10 snapshots** across three groups:
-
-| Group | Snapshots |
-|---|---|
-| Desktop (1280 × 800) | Search page (idle), Docs page, Dashboard (no wallet) |
-| Mobile (375 × 812) | Same three pages at a mobile viewport |
-| Components | Navbar, LiveTicker, StatsGrid, Footer |
-
-#### How animated elements are kept stable
-
-The UI uses several sources of non-determinism that would make snapshots flaky
-without mitigation:
-
-| Element | Problem | Fix |
-|---|---|---|
-| `AnimatedBackground` (canvas) | `Math.random()` + `requestAnimationFrame` produce different pixels every run | Masked in every snapshot (blacked out before comparison) |
-| `LiveTicker` | CSS `animate-ticker` scrolls content horizontally | `contextOptions.reducedMotion: 'reduce'` in `playwright.config.ts` pauses the animation |
-| Framer Motion transitions | Page entry animations move elements | `contextOptions.reducedMotion: 'reduce'` causes Framer Motion to skip transitions |
-| Spinning search icon | Continuous CSS `rotate` | Masked per-snapshot with the `.w-20.h-20` selector |
-| `StatsGrid` `/health` polling | Live server numbers differ between runs | `/health` is intercepted and returns a fixed JSON response |
-| `DashboardPage` timestamps | `formatTimeAgo` produces strings like "3 minutes ago" | `page.clock.install()` freezes `Date.now()` at a fixed epoch |
-
-#### Updating baselines deliberately
-
-When you make an **intentional** visual change (new component, layout tweak,
-redesign), the old baselines no longer match and the tests will fail. Update
-them like this:
-
-```bash
-# 1. Make your UI changes and verify them manually in the browser.
-
-# 2. Regenerate all baselines (overwrites files in e2e/snapshots/).
-npm run test:visual:update
-
-# 3. Review the diff — only the snapshots for screens you changed should update.
-git diff e2e/snapshots/
-
-# 4. Commit the updated baselines together with your UI change.
-git add e2e/snapshots/
-git commit -m "test(visual): update baselines for <your change>"
-```
-
-> **Tip:** If only one test needs a new baseline, you can pass a name filter:
-> ```bash
-> npm run test:visual:update -- --grep "docs page"
-> ```
-
-#### What happens in CI
-
-The `visual` job in `.github/workflows/ci.yml` runs on every pull request:
-
-1. Builds the frontend with `npm run build`.
-2. Runs `npx playwright test` against `vite preview`.
-3. **Always** uploads the full Playwright HTML report as a CI artifact
-   (`playwright-report`) — visible in the Actions → Artifacts panel.
-4. On **failure**, also uploads `test-results/` as `snapshot-diffs` so
-   reviewers can download the side-by-side PNG diffs without running locally.
-
-If the visual job fails on your PR because of a snapshot mismatch, either:
-
-- **Unintentional regression** — fix the UI change that caused it and push again.
-- **Intentional change** — run `npm run test:visual:update` locally, commit the
-  new baselines, and push. Describe the visual change in the PR body.
-
-#### Snapshot file naming
-
-Snapshots are named `<test-description>-<platform>.png` and live under
-`e2e/snapshots/visual.spec.ts-snapshots/`. Playwright appends the OS name
-automatically (e.g. `-linux.png`). CI always runs on `ubuntu-latest`, so
-baselines committed from Linux are the authoritative reference. If you generate
-baselines on macOS or Windows, CI will regenerate them on the first run and
-show a diff — this is expected and the CI-generated files become the canonical
-ones after that first run.
-
-### Running the TypeScript compiler
-
-```bash
-# Check all TypeScript errors (does not emit files)
-npx tsc --noEmit
-```
+This checks all three TypeScript projects: `tsconfig.json` (app),
+`tsconfig.server.json` (server, MCP server, scripts) and
+`tsconfig.node.json` (`vite.config.ts`). A type error in any of them
+fails CI.
 
 ### End-to-end test script
 

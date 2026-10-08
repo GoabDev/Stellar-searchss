@@ -1,7 +1,5 @@
-import { describe, expect, it, vi, afterEach } from 'vitest'
-
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  buildCorsHeaders,
   buildCorsOptions,
   getCorsStartupMessage,
   isProductionEnv,
@@ -135,31 +133,6 @@ describe('buildCorsOptions', () => {
     const callback = vi.fn()
     ;(options.origin as Function)('https://anything.com', callback)
     expect(callback).toHaveBeenCalledWith(null, false)
-  })
-})
-
-describe('buildCorsHeaders', () => {
-  it('uses a wildcard origin in development', () => {
-    const headers = buildCorsHeaders('https://anywhere.com', { NODE_ENV: 'development' })
-    expect(headers['Access-Control-Allow-Origin']).toBe('*')
-    expect(headers['Access-Control-Allow-Headers']).toContain('payment-signature')
-    expect(headers['Access-Control-Expose-Headers']).toContain('PAYMENT-REQUIRED')
-  })
-
-  it('echoes an allowlisted origin in production', () => {
-    const headers = buildCorsHeaders('https://allowed.com', {
-      NODE_ENV: 'production',
-      ALLOWED_ORIGINS: 'https://allowed.com',
-    })
-    expect(headers['Access-Control-Allow-Origin']).toBe('https://allowed.com')
-  })
-
-  it('omits the origin header for a non-allowlisted origin in production', () => {
-    const headers = buildCorsHeaders('https://evil.com', {
-      NODE_ENV: 'production',
-      ALLOWED_ORIGINS: 'https://allowed.com',
-    })
-    expect(headers['Access-Control-Allow-Origin']).toBeUndefined()
   })
 })
 

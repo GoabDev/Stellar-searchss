@@ -30,6 +30,7 @@ import {
   ErrorCode,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js'
+import type { ListToolsResult } from '@modelcontextprotocol/sdk/types.js'
 import Groq from 'groq-sdk'
 import dotenv from 'dotenv'
 import { readFileSync } from 'fs'
@@ -321,15 +322,63 @@ function balanceMessage(address: string, account: HorizonAccount): string {
 
   return lines.join('\n')}
 
+// ─── x402 paying client (issue #95) ─────────────────────────────────────────
+// The MCP server is a *payer*, not the payee: /search, /images and /news are
+// guarded by the server's x402 middleware, so a bare fetch returns HTTP 402.
+// We sign the payment with the MCP's own Stellar key.
+const MCP_STELLAR_SECRET = process.env.MCP_STELLAR_SECRET
+// The CAIP-2 network the server advertises in its 402 `accepts` (same value as
+// the server's STELLAR_NETWORK; both default to `stellar:testnet`).
+const X402_NETWORK = (process.env.X402_NETWORK || STELLAR_NETWORK) as Network
+
+const NO_PAYMENT_CONFIG =
+  'No x402 payment method configured. Set MCP_STELLAR_SECRET to a funded Stellar ' +
+  'secret key (S...) so the MCP server can pay the per-query fee. ' +
+  'Paid tools: web_search, image_search, news_search. ' +
+  'Free tools (ai_summarize, check_balance, get_search_stats) need no payment.'
+
+let paidFetch: typeof fetch | null = null
+
+/**
+ * A `fetch` that transparently answers x402 402 responses by signing a payment
+ * with the MCP key (`MCP_STELLAR_SECRET`), or throws an actionable error when
+ * that key is absent. Built lazily so the free tools keep working without a
+ * wallet.
+ */
+function getPaidFetch(): typeof fetch {
+  if (paidFetch) return paidFetch
+  if (!MCP_STELLAR_SECRET) throw new Error(NO_PAYMENT_CONFIG)
+
+  const signer = createEd25519Signer(MCP_STELLAR_SECRET, X402_NETWORK)
+  const scheme = new ExactStellarScheme(signer)
+  const client = new x402Client().register(X402_NETWORK, scheme)
+  paidFetch = wrapFetchWithPayment(fetch, client)
+  return paidFetch
+}
+
+/** Turn a non-OK HTTP status into a diagnosable message (402 = payment). */
+function describeHttpError(status: number): string {
+  if (status === 402) {
+    return (
+      'payment rejected (HTTP 402) — check that MCP_STELLAR_SECRET holds enough ' +
+      'USDC and a USDC trustline, and that the x402 facilitator is reachable'
+    )
+  }
+  return `HTTP ${status}`
+}
+
+if (!MCP_STELLAR_SECRET) {
+  console.error(`[stellar-search-mcp] ${NO_PAYMENT_CONFIG}`)
+}
+
 // ─── MCP server ───────────────────────────────────────────────────────────
 export const server = new Server(
   { name: 'stellar-search', version: APP_VERSION },
   { capabilities: { tools: {}, prompts: {}, resources: {} } },
 )
 
-// Exported so tests can assert that descriptions match the tools' actual
-// behaviour without spinning up the server.
-export const tools = [
+export const listToolsHandler = async (): Promise<ListToolsResult> => ({
+  tools: [
     {
       name: 'web_search',
       description: `Search the web via StellarSearch (Serper.dev results). The upstream endpoint is priced at ${AMOUNT_USDC} USDC per query via x402, but this MCP server does not configure a payment signer, so it cannot settle a payment itself. The call returns results only if StellarSearch settles the request, and a payment is reported only when the response includes a confirmed settlement transaction.
@@ -452,6 +501,8 @@ Use this tool when an agent needs to audit or report its own spending.`,
 export const listToolsHandler = async () => ({ tools })
 server.setRequestHandler(ListToolsRequestSchema, listToolsHandler)
 
+server.setRequestHandler(ListToolsRequestSchema, listToolsHandler)
+
 // ─── MCP prompts ──────────────────────────────────────────────────────────
 server.setRequestHandler(ListPromptsRequestSchema, async () => ({
   prompts: [
@@ -568,7 +619,17 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   throw new Error(`Unknown prompt: ${name}`)
 })
 
-export const callToolHandler = async (request: any) => {
+// Every tool in this server answers with plain text content. A type alias
+// (not an interface) so it gets an implicit index signature and stays
+// assignable to the SDK's CallToolResult.
+type ToolCallResult = {
+  content: Array<{ type: 'text'; text: string }>
+  isError?: boolean
+}
+
+export const callToolHandler = async (
+  request: { params: { name: string; arguments?: Record<string, unknown> } }
+): Promise<ToolCallResult> => {
   const { name, arguments: args } = request.params
 
   // ── web_search ────────────────────────────────────────────────────────
@@ -893,6 +954,8 @@ export const callToolHandler = async (request: any) => {
 
   return { content: [{ type: 'text' as const, text: `Unknown tool: ${name}` }], isError: true }
 }
+server.setRequestHandler(CallToolRequestSchema, callToolHandler)
+
 server.setRequestHandler(CallToolRequestSchema, callToolHandler)
 
 // ─── Resources ────────────────────────────────────────────────────────────

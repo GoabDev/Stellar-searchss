@@ -55,8 +55,7 @@ export default function App() {
   }, [])
 
   const {
-    wallet, transactions, txLoading, transactionError, txHasMore,
-    txLoadingMore, loadMoreTransactions,
+    wallet, transactions, txLoading, txHasMore, txLoadingMore, loadMoreTransactions,
     connect, disconnect, refresh,
   } = useFreighterWallet()
 
@@ -146,10 +145,8 @@ export default function App() {
                     usdcBalance={wallet.usdcBalance}
                     xlmBalance={wallet.xlmBalance}
                     onRefresh={refresh}
-                    transactionError={transactionError}
-                    onRetryTransactions={refresh}
                     hasMore={txHasMore}
-                    onLoadMore={() => wallet.publicKey && loadMoreTransactions(wallet.publicKey)}
+                    onLoadMore={() => loadMoreTransactions(wallet.publicKey ?? '')}
                     loadingMore={txLoadingMore}
                   />
                 )}

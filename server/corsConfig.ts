@@ -11,6 +11,7 @@
  * Its unit tests live in `server/corsConfig.test.ts`.
  */
 
+
 import type { CorsOptions } from 'cors'
 
 /**
@@ -71,37 +72,6 @@ export function getCorsStartupMessage(): string {
   return `CORS: allowlist (${allowed.length} origin${allowed.length === 1 ? '' : 's'})`
 }
 
-/**
- * Plain CORS header map for response writers that don't go through the
- * `cors` Express middleware (the Vercel serverless functions). It is derived
- * from the same constants as {@link buildCorsOptions}, so Express and the
- * serverless functions can never drift.
- *
- * In development (or non-production) the origin is `*`. In production the
- * request origin is echoed back only when it is in ALLOWED_ORIGINS; otherwise
- * no `Access-Control-Allow-Origin` header is sent.
- */
-export function buildCorsHeaders(
-  origin?: string | null,
-  env: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Access-Control-Allow-Methods': [...CORS_METHODS].join(', '),
-    'Access-Control-Allow-Headers': [...CORS_ALLOWED_HEADERS].join(', '),
-    'Access-Control-Expose-Headers': [...CORS_EXPOSED_HEADERS].join(', '),
-  }
-
-  if (env.NODE_ENV !== 'production') {
-    headers['Access-Control-Allow-Origin'] = '*'
-    return headers
-  }
-
-  const allowed = parseAllowedOrigins(env.ALLOWED_ORIGINS)
-  if (origin && allowed.includes(origin)) {
-    headers['Access-Control-Allow-Origin'] = origin
-  }
-  return headers
-}
 
 export function buildCorsOptions(): CorsOptions {
   const base: CorsOptions = {
