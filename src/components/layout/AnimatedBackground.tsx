@@ -68,7 +68,8 @@ export function AnimatedBackground() {
     const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     if (prefersReducedMotion) return
 
-    const matrixChars = '01ABCDEF⬡◈▲⬢x402USDC'.split('')
+    let animId: number
+    const matrixChars = '01ABCDEFx402USDC'.split('')
 
     const resize = () => {
       canvas.width = window.innerWidth
@@ -168,6 +169,26 @@ export function AnimatedBackground() {
       }
 
     }
+const renderStatic = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      const g = ctx.createRadialGradient(
+        canvas.width * 0.5, canvas.height * 0.25, 0,
+        canvas.width * 0.5, canvas.height * 0.25, canvas.width * 0.65
+      )
+      g.addColorStop(0, 'rgba(14,165,233,0.07)')
+      g.addColorStop(1, 'transparent')
+      ctx.fillStyle = g
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+      ctx.strokeStyle = 'rgba(0,245,255,0.025)'
+      ctx.lineWidth = 0.5
+      for (let x = 0; x < canvas.width; x += 40) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke()
+      }
+      for (let y = 0; y < canvas.height; y += 40) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke()
+      }
+    }
 
     const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
     const addMotionListener = (listener: () => void) => {
@@ -179,8 +200,21 @@ export function AnimatedBackground() {
       else reducedMotionQuery.removeListener(listener)
     }
 
-    // Draw one frame for the static/reduced-motion state before starting the loop.
-    draw()
+    const start = () => {
+      if (reducedMotionQuery.matches) {
+        renderStatic()
+      } else {
+        draw()
+      }
+    }
+
+    const handleChange = () => {
+      cancelAnimationFrame(animId)
+      start()
+    }
+
+    start()
+    addMotionListener(handleChange)
     const animationLoop = createAnimationLoopController({
       isVisible: () => document.visibilityState === 'visible',
       isReducedMotion: () => reducedMotionQuery.matches,

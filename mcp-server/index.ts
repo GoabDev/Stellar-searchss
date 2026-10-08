@@ -3,7 +3,9 @@
  * StellarSearch MCP Server
  *
  * Exposes tools for Claude Code (and any MCP client):
- *   - web_search:       pays 0.001 USDC via x402, returns Serper.dev results
+ *   - web_search:       queries the x402-priced StellarSearch API (Serper.dev results).
+ *                       This process does not configure a payment signer, so it cannot
+ *                       settle a payment itself and only reports one that the API confirms.
  *   - ai_summarize:     uses Groq to summarise search results
  *   - summarize_url:    fetches a public URL and summarises it with Groq (free)
  *   - check_balance:    reads live USDC balance from Stellar Horizon
@@ -17,6 +19,7 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -34,6 +37,7 @@ import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { pathToFileURL } from 'node:url'
 import { StrKey } from '@stellar/stellar-sdk'
+import http from 'node:http'
 import { 
   HORIZON_URL, 
   USDC_ISSUER, 
@@ -41,7 +45,7 @@ import {
   STELLAR_EXPERT_URL,
   AMOUNT_USDC,
   IS_MAINNET
-} from '../src/lib/constants'
+} from '../shared/constants.js'
 
 dotenv.config()
 
@@ -51,7 +55,12 @@ const { version: APP_VERSION } = JSON.parse(
 )
 
 const SERVER_URL = process.env.SEARCH_API_URL || 'http://localhost:3001'
-const GROQ_API_KEY = process.env.GROQ_API_KEY!
+const GROQ_API_KEY = process.env.GROQ_API_KEY || ''
+
+const TRANSPORT = (process.env.MCP_TRANSPORT || 'stdio').toLowerCase()
+const HTTP_PORT = parseInt(process.env.MCP_HTTP_PORT || '3002', 10)
+const HTTP_HOST = process.env.MCP_HTTP_HOST || '0.0.0.0'
+const HTTP_AUTH_TOKEN = process.env.MCP_HTTP_AUTH_TOKEN
 
 const groq = new Groq({ apiKey: GROQ_API_KEY })
 
@@ -90,6 +99,27 @@ export function reportToolError(tool: string, error: unknown) {
     content: [{ type: 'text' as const, text: getSafeToolErrorMessage(tool, error) }],
     isError: true,
   }
+}
+
+/**
+ * Render the payment status line for a paid tool result.
+ *
+ * This MCP server does not configure an x402 payer/signer, so it must never
+ * assert that a payment happened just because the upstream endpoint is
+ * x402-priced. A settlement is only reported when the response carries the
+ * facilitator's settlement transaction; otherwise the result says the payment
+ * was not confirmed.
+ */
+export function formatPaymentLine(data: {
+  paidAmount?: string
+  currency?: string
+  network?: string
+  txHash?: string | null
+}): string {
+  if (data.txHash) {
+    return `💰 Paid: ${data.paidAmount} ${data.currency} on ${data.network}`
+  }
+  return '💰 Payment: not confirmed — the StellarSearch API returned no settlement transaction for this request.'
 }
 
 const HEALTH_RESOURCE_URI = 'stellar-search://health'
@@ -292,17 +322,17 @@ function balanceMessage(address: string, account: HorizonAccount): string {
   return lines.join('\n')}
 
 // ─── MCP server ───────────────────────────────────────────────────────────
-const server = new Server(
+export const server = new Server(
   { name: 'stellar-search', version: APP_VERSION },
   { capabilities: { tools: {}, prompts: {}, resources: {} } },
 )
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+// Exported so tests can assert that descriptions match the tools' actual
+// behaviour without spinning up the server.
+export const tools = [
     {
       name: 'web_search',
-      description: `Search the web via StellarSearch. Automatically pays ${AMOUNT_USDC} USDC on Stellar (x402 protocol).
-The server handles the full payment flow: HTTP 402 → sign Soroban auth → settle → return results.
+      description: `Search the web via StellarSearch (Serper.dev results). The upstream endpoint is priced at ${AMOUNT_USDC} USDC per query via x402, but this MCP server does not configure a payment signer, so it cannot settle a payment itself. The call returns results only if StellarSearch settles the request, and a payment is reported only when the response includes a confirmed settlement transaction.
 Use for current events, documentation, research, or anything needing up-to-date web information.`,
       inputSchema: {
         type: 'object',
@@ -316,8 +346,8 @@ Use for current events, documentation, research, or anything needing up-to-date 
     },
     {
       name: 'image_search',
-      description: `Search the web for images via StellarSearch. Automatically pays ${AMOUNT_USDC} USDC on Stellar (x402 protocol).
-Returns image URLs, titles, and source domains via the Serper.dev images API.
+      description: `Search the web for images via StellarSearch (Serper.dev images API). The upstream endpoint is priced at ${AMOUNT_USDC} USDC per query via x402, but this MCP server does not configure a payment signer, so it cannot settle a payment itself. The call returns results only if StellarSearch settles the request, and a payment is reported only when the response includes a confirmed settlement transaction.
+Returns image URLs, titles, and source domains.
 Use for visual references, photos, diagrams, or anything where you need image results.`,
       inputSchema: {
         type: 'object',
@@ -331,8 +361,8 @@ Use for visual references, photos, diagrams, or anything where you need image re
     },
     {
       name: 'news_search',
-      description: `Search recent news articles via StellarSearch. Automatically pays ${AMOUNT_USDC} USDC on Stellar (x402 protocol).
-Returns articles with title, URL, snippet, publication date, and source via the Serper.dev news API.
+      description: `Search recent news articles via StellarSearch (Serper.dev news API). The upstream endpoint is priced at ${AMOUNT_USDC} USDC per query via x402, but this MCP server does not configure a payment signer, so it cannot settle a payment itself. The call returns results only if StellarSearch settles the request, and a payment is reported only when the response includes a confirmed settlement transaction.
+Returns articles with title, URL, snippet, publication date, and source.
 Use for breaking stories, current events, and time-sensitive reporting.`,
       inputSchema: {
         type: 'object',
@@ -393,8 +423,34 @@ Prefer reading the ${HEALTH_RESOURCE_URI} resource if your client supports resou
         properties: {},
       },
     },
-  ],
-}))
+    {
+      name: 'list_receipts',
+      description: `List past paid queries recorded by the StellarSearch server.
+Each receipt contains the query type (search/images/news), timestamp, amount paid in USDC, and the Stellar transaction hash.
+The response also includes a \`totalSpentUsdc\` summary across all returned receipts.
+Use this tool when an agent needs to audit or report its own spending.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          from: {
+            type: 'string',
+            description: 'ISO-8601 start of date range (inclusive), e.g. "2026-01-01T00:00:00Z"',
+          },
+          to: {
+            type: 'string',
+            description: 'ISO-8601 end of date range (inclusive), e.g. "2026-12-31T23:59:59Z"',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of receipts to return (default: all within range, max 500)',
+          },
+        },
+      },
+    },
+]
+
+export const listToolsHandler = async () => ({ tools })
+server.setRequestHandler(ListToolsRequestSchema, listToolsHandler)
 
 // ─── MCP prompts ──────────────────────────────────────────────────────────
 server.setRequestHandler(ListPromptsRequestSchema, async () => ({
@@ -512,38 +568,40 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   throw new Error(`Unknown prompt: ${name}`)
 })
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+export const callToolHandler = async (request: any) => {
   const { name, arguments: args } = request.params
 
   // ── web_search ────────────────────────────────────────────────────────
   if (name === 'web_search') {
-    const { query, count = 5, freshness } = args as { query: string; count?: number; freshness?: string }
+    const { query, count = 5, freshness } = (args || {}) as { query: string; count?: number; freshness?: string }
 
     try {
       const params = new URLSearchParams({ q: query, count: String(count) })
       if (freshness) params.set('freshness', freshness)
 
-      // The server's x402 middleware handles the full payment flow.
-      // In server-to-server mode the server needs a funded Stellar key.
-      // For MCP usage we call the server which itself holds the paying wallet.
+      // The upstream StellarSearch API enforces x402 on this route. This MCP
+      // process does not configure a payer/signer, so the request is forwarded
+      // as-is: any payment is real only if the API settles it and returns a
+      // settlement transaction, which formatPaymentLine verifies before
+      // reporting a payment to the caller.
       const res = await fetch(`${SERVER_URL}/search?${params}`)
 
       if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
+        const e: any = await res.json().catch(() => ({}))
         throw new Error(e.error || `HTTP ${res.status}`)
       }
 
-      const data = await res.json()
+      const data: any = await res.json()
       const formatted = data.results
         .map((r: any, i: number) => `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.description}`)
         .join('\n\n')
 
       return {
         content: [{
-          type: 'text',
+          type: 'text' as const,
           text: [
             `🔍 Results for: "${query}"`,
-            `💰 Paid: ${data.paidAmount} ${data.currency} on ${data.network}`,
+            formatPaymentLine(data),
             `⚡ Latency: ${data.latencyMs}ms`,
             `📊 ${data.count} results\n`,
             formatted,
@@ -572,16 +630,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       const data: any = await res.json()
-      const formatted = data.results
+      const formatted = (data.results || [])
         .map((r: any, i: number) => `${i + 1}. **${r.title}**\n   Image: ${r.imageUrl}\n   Source: ${r.sourceUrl} (${r.source})`)
         .join('\n\n')
 
       return {
         content: [{
-          type: 'text',
+          type: 'text' as const,
           text: [
             `🖼️  Image results for: "${query}"`,
-            `💰 Paid: ${data.paidAmount} ${data.currency} on ${data.network}`,
+            formatPaymentLine(data),
             `⚡ Latency: ${data.latencyMs}ms`,
             `📊 ${data.count} results\n`,
             formatted,
@@ -595,7 +653,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // ── news_search ───────────────────────────────────────────────────────
   if (name === 'news_search') {
-    const { query, count = 10, freshness } = args as {
+    const { query, count = 10, freshness } = (args || {}) as {
       query: string; count?: number; freshness?: string
     }
 
@@ -612,7 +670,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       const data: any = await res.json()
-      const formatted = data.results
+      const formatted = (data.results || [])
         .map((r: any, i: number) => {
           const date = r.publishedAt ? ` · ${r.publishedAt}` : ''
           return `${i + 1}. **${r.title}** (${r.source}${date})\n   ${r.url}\n   ${r.snippet}`
@@ -621,10 +679,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       return {
         content: [{
-          type: 'text',
+          type: 'text' as const,
           text: [
             `📰 News results for: "${query}"`,
-            `💰 Paid: ${data.paidAmount} ${data.currency} on ${data.network}`,
+            formatPaymentLine(data),
             `⚡ Latency: ${data.latencyMs}ms`,
             `📊 ${data.count} results\n`,
             formatted,
@@ -638,7 +696,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // ── ai_summarize ──────────────────────────────────────────────────────
   if (name === 'ai_summarize') {
-    const { text, instruction = 'summarise' } = args as { text: string; instruction?: string }
+    const { text, instruction = 'summarise' } = (args || {}) as { text: string; instruction?: string }
 
     try {
       const completion = await groq.chat.completions.create({
@@ -652,7 +710,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       })
 
       const content = completion.choices[0]?.message?.content || 'No response.'
-      return { content: [{ type: 'text', text: content }] }
+      return { content: [{ type: 'text' as const, text: content }] }
     } catch (err: any) {
       return reportToolError('AI summary', err)
     }
@@ -756,8 +814,86 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
-  return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true }
-})
+  // ── list_receipts ─────────────────────────────────────────────────────
+  if (name === 'list_receipts') {
+    const { from, to, limit } = args as { from?: string; to?: string; limit?: number }
+
+    try {
+      const params = new URLSearchParams()
+      if (from)  params.set('from',  from)
+      if (to)    params.set('to',    to)
+      if (limit) params.set('limit', String(Math.floor(limit)))
+
+      const url = `${SERVER_URL}/receipts${params.toString() ? `?${params}` : ''}`
+      const res = await fetch(url)
+
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({})) as { error?: string }
+        throw new Error(e.error || `HTTP ${res.status}`)
+      }
+
+      const data = await res.json() as {
+        receipts: Array<{
+          id: string
+          timestamp: string
+          type: string
+          query: string
+          amountUsdc: string
+          currency: string
+          network: string
+          txHash: string | null
+          latencyMs: number
+        }>
+        count: number
+        totalSpentUsdc: string
+        currency: string
+      }
+
+      if (data.count === 0) {
+        const rangeNote = from || to
+          ? ` in the specified date range${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}`
+          : ''
+        return {
+          content: [{
+            type: 'text',
+            text: `📋 No paid-query receipts found${rangeNote}.\nThe server records receipts in memory while it is running; they reset on restart.`,
+          }],
+        }
+      }
+
+      const lines: string[] = [
+        `📋 Paid-Query Receipts (${data.count} shown)`,
+        `💸 Total spent: ${data.totalSpentUsdc} ${data.currency}`,
+        ...(from || to
+          ? [`📅 Date range: ${from ?? '(start)'}  →  ${to ?? '(now)'}`]
+          : []),
+        '',
+      ]
+
+      for (const r of data.receipts) {
+        const typeIcon = r.type === 'images' ? '🖼️' : r.type === 'news' ? '📰' : '🔍'
+        const txLine = r.txHash
+          ? `   Tx:        ${r.txHash}`
+          : `   Tx:        (not available)`
+        lines.push(
+          `${typeIcon} [${r.timestamp}] ${r.type.toUpperCase()}`,
+          `   Query:     "${r.query}"`,
+          `   Paid:      ${r.amountUsdc} ${r.currency} on ${r.network}`,
+          txLine,
+          `   Latency:   ${r.latencyMs}ms`,
+          '',
+        )
+      }
+
+      return { content: [{ type: 'text', text: lines.join('\n') }] }
+    } catch (err: any) {
+      return reportToolError('list_receipts', err)
+    }
+  }
+
+  return { content: [{ type: 'text' as const, text: `Unknown tool: ${name}` }], isError: true }
+}
+server.setRequestHandler(CallToolRequestSchema, callToolHandler)
 
 // ─── Resources ────────────────────────────────────────────────────────────
 // Server stats are reference data, so a client can list and read them directly
@@ -798,7 +934,68 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 })
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const transport = new StdioServerTransport()
-  await server.connect(transport)
-  console.error('StellarSearch MCP server started')
+  // ─── Transport selection ──────────────────────────────────────────────────
+  if (TRANSPORT === 'http' || TRANSPORT === 'sse') {
+    // HTTP + SSE transport for hosted deployments.
+    // Clients connect via GET /sse (event stream) and POST /messages (JSON-RPC).
+    // Optional bearer-token auth via MCP_HTTP_AUTH_TOKEN.
+    const sessions = new Map<string, SSEServerTransport>()
+
+    const checkAuth = (req: http.IncomingMessage): boolean => {
+      if (!HTTP_AUTH_TOKEN) return true
+      const header = req.headers['authorization'] || ''
+      const token = Array.isArray(header) ? header[0] : header
+      return token === `Bearer ${HTTP_AUTH_TOKEN}`
+    }
+
+    const httpServer = http.createServer(async (req, res) => {
+      const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
+
+      if (!checkAuth(req)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Unauthorized' }))
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/sse') {
+        const transport = new SSEServerTransport('/messages', res)
+        sessions.set(transport.sessionId, transport)
+        res.on('close', () => sessions.delete(transport.sessionId))
+        await server.connect(transport)
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/messages') {
+        const sessionId = url.searchParams.get('sessionId') || ''
+        const transport = sessions.get(sessionId)
+        if (!transport) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Session not found' }))
+          return
+        }
+        await transport.handlePostMessage(req, res)
+        return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ status: 'ok', transport: 'http', sessions: sessions.size }))
+        return
+      }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Not found' }))
+    })
+
+    httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
+      console.error(`StellarSearch MCP server started (HTTP+SSE) on http://${HTTP_HOST}:${HTTP_PORT}`)
+      console.error(`  SSE endpoint:      GET  /sse`)
+      console.error(`  Messages endpoint: POST /messages?sessionId=<id>`)
+      console.error(`  Auth:              ${HTTP_AUTH_TOKEN ? 'bearer token required' : 'disabled'}`)
+    })
+  } else {
+    const transport = new StdioServerTransport()
+    await server.connect(transport)
+    console.error('StellarSearch MCP server started (stdio)')
+  }
 }

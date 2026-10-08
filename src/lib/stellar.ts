@@ -3,6 +3,7 @@
  */
 
 import { STELLAR_EXPERT_URL } from './constants'
+import { HealthResponseValidationError, parseHealthResponse } from '../types'
 
 export * from './constants'
 
@@ -24,6 +25,16 @@ export function explorerAccountUrl(address: string): string {
   return `${STELLAR_EXPERT_URL}/account/${address}`
 }
 
+/** Stellar Expert asset page for an issued asset, e.g. `USDC-GABC...`. */
+export function explorerAssetUrl(assetCode: string, issuer: string): string {
+  return `${STELLAR_EXPERT_URL}/asset/${assetCode}-${issuer}`
+}
+
+/** Stellar Expert contract page for a Soroban contract id. */
+export function explorerContractUrl(contractId: string): string {
+  return `${STELLAR_EXPERT_URL}/contract/${contractId}`
+}
+
 export function formatTimeAgo(isoString: string): string {
   const diff = Date.now() - new Date(isoString).getTime()
   const s = Math.floor(diff / 1000)
@@ -39,7 +50,7 @@ export function formatTimeAgo(isoString: string): string {
  * Fetch live server stats from the /api/health endpoint.
  * Uses the same SERVER_URL logic as the search functionality.
  */
-export async function fetchServerStats() {
+export async function fetchServerStats(): Promise<import('../types').HealthResponse | null> {
   try {
     const SERVER_URL = (import.meta as any).env?.VITE_SERVER_URL ?? (
       typeof window !== 'undefined' && window.location.origin.includes('vercel.app') 
@@ -49,8 +60,9 @@ export async function fetchServerStats() {
     
     const res = await fetch(`${SERVER_URL}/health`)
     if (!res.ok) return null
-    return await res.json()
-  } catch {
+    return parseHealthResponse(await res.json())
+  } catch (error) {
+    if (error instanceof HealthResponseValidationError) throw error
     return null
   }
 }

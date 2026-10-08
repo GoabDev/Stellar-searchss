@@ -54,6 +54,7 @@ function SkeletonCell() {
 
 function ImageCell({ result, onSelect }: { result: ImageResult; onSelect?: (r: ImageResult) => void }) {
   const [loaded, setLoaded] = React.useState(false)
+  const [imageFailed, setImageFailed] = React.useState(false)
 
   return (
     <button
@@ -76,13 +77,18 @@ function ImageCell({ result, onSelect }: { result: ImageResult; onSelect?: (r: I
         />
       )}
       <img
-        src={result.thumbnailUrl}
+        src={imageFailed ? '/image-placeholder.svg' : result.thumbnailUrl}
         alt={result.title ?? ''}
         width={result.width}
         height={result.height}
         loading="lazy"
         decoding="async"
+        referrerPolicy="no-referrer"
         onLoad={() => setLoaded(true)}
+        onError={() => {
+          setImageFailed(true);
+          setLoaded(true);
+        }}
         style={{
           ...imageStyles,
           opacity: loaded ? 1 : 0,
