@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import { IS_MAINNET, AMOUNT_USDC } from '../../lib/stellar'
 
 interface Props {
@@ -16,9 +16,9 @@ const getTickerItems = () => [
 ]
 
 function usePrefersReducedMotion() {
-  const [prefersReducedMotion, setPrefersReducedMotion] = React.useState(false)
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return
 
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -52,8 +52,8 @@ export function LiveTicker({ walletConnected }: Props) {
         className={`flex items-center gap-8 whitespace-nowrap ${prefersReducedMotion ? '' : 'animate-ticker'}`}
         style={{ width: prefersReducedMotion ? 'auto' : 'max-content' }}
       >
-        {doubled.map(([k, v], i) => (
-          <div key={i} className="inline-flex items-center gap-2 px-6">
+        {doubled.map(([k, v], idx) => (
+          <div key={idx} className="inline-flex items-center px-6">
             <span
               className="font-display text-neon-cyan/30 tracking-widest"
               style={{ fontSize: '10px' }}

@@ -68,7 +68,7 @@ export function AnimatedBackground() {
     const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     if (prefersReducedMotion) return
 
-    const matrixChars = '01ABCDEF⬡◈▲⬢x402USDC'.split('')
+    const matrixChars = '01ABCDEFx402USDC'.split('')
 
     const resize = () => {
       canvas.width = window.innerWidth

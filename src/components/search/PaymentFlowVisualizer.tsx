@@ -1,5 +1,5 @@
 import { m, AnimatePresence } from 'framer-motion'
-import ExternalLink from 'lucide-react/dist/esm/icons/external-link'
+import { ExternalLink } from 'lucide-react'
 import type { SearchSession } from '../../hooks/useSearch'
 import { explorerTxUrl, truncateHash } from '../../lib/stellar'
 
