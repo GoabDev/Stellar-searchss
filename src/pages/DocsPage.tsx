@@ -104,6 +104,7 @@ export function DocsPage() {
           {[
             { label: 'x402 Docs',        href: 'https://developers.stellar.org/docs/build/agentic-payments/x402' },
             { label: 'GitHub Repo',      href: 'https://github.com/stellar/x402-stellar' },
+            { label: 'Stellar glossary', href: 'https://github.com/StellarAgent-AI-Agent-Payment-Rails/Stellar-searchss/blob/main/docs/glossary.md' },
             { label: `${networkLabel} Explorer`, href: STELLAR_EXPERT_URL },
           ].map(({ label, href }) => (
             <a
