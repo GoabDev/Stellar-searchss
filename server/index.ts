@@ -868,6 +868,8 @@ app.get('/health', (req: Request, res: Response) => {
   const payload = {
     status:                    'ok',
     version:                   APP_VERSION,
+    commit:                    process.env.GIT_COMMIT || process.env.VERCEL_GIT_COMMIT_SHA || null,
+    startedAt:                 new Date(stats.startTime).toISOString(),
     network:                   NETWORK,
     pricePerQuery:             '0.001 USDC',
     protocol:                  'x402',
@@ -905,6 +907,23 @@ app.get('/', (_req: Request, res: Response) => {
     name:        'StellarSearch',
     version:     APP_VERSION,
     description: 'Pay-per-query web search for AI agents via x402 on Stellar',
+    endpoints: {
+      'GET /search?q=<query>': '0.001 USDC via x402',
+      'GET /images?q=<query>': '0.001 USDC via x402 — image results',
+      'GET /news?q=<query>':   '0.001 USDC via x402 — news articles',
+      'POST /ai/chat':         'Groq AI — free',
+      'POST /summarize-url':   'Fetch a public URL and summarise it with Groq — free',
+      'GET /receipts':         'List past paid-query receipts with total-spent summary',
+      'GET /health':           'Live server stats',
+    },
+  })
+})
+
+// ─── 404 Catch-All ────────────────────────────────────────────────────────
+app.use((req: Request, res: Response) => {
+  res.status(404).json({
+    error: 'Not Found',
+    path: req.path,
     endpoints: {
       'GET /search?q=<query>': '0.001 USDC via x402',
       'GET /images?q=<query>': '0.001 USDC via x402 — image results',
