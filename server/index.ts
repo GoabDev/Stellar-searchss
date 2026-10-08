@@ -1,9 +1,3 @@
-
-
-import crypto from 'node:crypto'
-import express, { Request, Response } from 'express'
-import compression from 'compression'
-import cors from 'cors'
 import dotenv from 'dotenv'
 import helmet from 'helmet'
 import { readFileSync } from 'fs'
@@ -61,7 +55,6 @@ interface SerperNewsResponse { news?: SerperNewsItem[] }
 
 dotenv.config()
 
-const app  = express()
 const PORT = process.env.PORT || 3001
 
 // ─── In-memory stats ──────────────────────────────────────────────────────
@@ -904,6 +897,8 @@ app.get('/health', (req: Request, res: Response) => {
   const payload = {
     status:                    'ok',
     version:                   APP_VERSION,
+    commit:                    process.env.GIT_COMMIT || process.env.VERCEL_GIT_COMMIT_SHA || null,
+    startedAt:                 new Date(stats.startTime).toISOString(),
     network:                   NETWORK,
     pricePerQuery:             '0.001 USDC',
     protocol:                  'x402',
@@ -953,17 +948,41 @@ app.get('/', (_req: Request, res: Response) => {
   })
 })
 
+// ─── 404 Catch-All ────────────────────────────────────────────────────────
+app.use((req: Request, res: Response) => {
+  res.status(404).json({
+    error: 'Not Found',
+    path: req.path,
+    endpoints: {
+      'GET /search?q=<query>': '0.001 USDC via x402',
+      'GET /images?q=<query>': '0.001 USDC via x402 — image results',
+      'GET /news?q=<query>':   '0.001 USDC via x402 — news articles',
+      'POST /ai/chat':         'Groq AI — free',
+      'POST /summarize-url':   'Fetch a public URL and summarise it with Groq — free',
+      'GET /receipts':         'List past paid-query receipts with total-spent summary',
+      'GET /health':           'Live server stats',
+    },
+  })
+})
+
 // ─── Start ────────────────────────────────────────────────────────────────
 if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test') {
+  const details = getStartupDetails()
   app.listen(PORT, () => {
     console.log(`\n🚀 StellarSearch on http://localhost:${PORT}`)
-    console.log(`   Network:     ${NETWORK}`)
-    console.log(`   Facilitator: ${FACILITATOR_URL}`)
-    console.log(`   Serper:      ${SERPER_API_KEY ? '✓' : '✗ MISSING'}`)
-    console.log(`   Groq:        ${GROQ_API_KEY  ? '✓' : '✗ MISSING'}`)
-    console.log(`   Receiving:   ${displayAddress(RECEIVING_ADDRESS)}`)
-    console.log(`   ${getCorsStartupMessage()}\n`)
+    console.log(`   Network:     ${details.network}`)
+    console.log(`   Facilitator: ${details.facilitator}`)
+    console.log(`   Serper:      ${details.serperConfigured ? '✓' : '✗ MISSING'}`)
+    console.log(`   Groq:        ${details.groqConfigured ? '✓' : '✗ MISSING'}`)
+    console.log(`   Receiving:   ${details.receiving}`)
+    console.log(`   ${details.cors}\n`)
   })
 }
 
+// Backwards-compatible re-exports for callers/tests that used server/index.ts
+// directly before the app/handlers split.
+export { addReceipt, receipts, validateQuery }
+export type { Receipt }
+
+export { createApp }
 export default app

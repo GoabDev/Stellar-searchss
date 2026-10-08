@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "setup": "bash scripts/setup.sh",
+    "prepare": "husky install",
     "dev": "vite",
     "test": "tsx --test mcp-server/index.test.ts",
     "test:watch": "vitest",
@@ -31,6 +32,7 @@
     "test:e2e:preview": "playwright test --project=preview",
     "test:e2e:ui": "playwright test --ui",
     "mcp:http": "tsx mcp-server/index.ts --transport http",
+    "test:mcp": "node --import tsx --test mcp-server/index.test.ts",
     "test:run": "vitest run"
   },
   "dependencies": {
@@ -87,7 +89,10 @@
     "typescript": "^5.3.3",
     "vite": "^5.1.0",
     "vitest": "^2.1.9",
-    "vitest-axe": "^0.1.0"
+    "vitest-axe": "^0.1.0",
+    "@commitlint/cli": "^19.8.1",
+    "@commitlint/config-conventional": "^19.8.1",
+    "husky": "^8.0.3"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
