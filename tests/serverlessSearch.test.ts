@@ -143,7 +143,9 @@ test('returns SDK payment requirements when no payment is present', async () => 
 
 test('returns paid results only after SDK verification and settlement succeed', async () => {
   verifyValid = true
-  const response = await fetch(`${baseUrl}/api/search?q=stellar`, { headers: { 'payment-signature': paymentHeader() } })
+  const response = await fetch(`${baseUrl}/api/search?q=stellar`, {
+    headers: { 'payment-signature': paymentHeader(), 'x-payment-response': 'untrusted-client-hash' },
+  })
   assert.equal(response.status, 200)
   assert.equal(verifyBodies.length, 1)
   assert.equal(settleBodies.length, 1)
@@ -155,6 +157,31 @@ test('returns paid results only after SDK verification and settlement succeed', 
   assert.equal(body.txHash, null)
   assert.equal(serperCalls, 1)
   assert.match(response.headers.get('access-control-expose-headers')!, /PAYMENT-RESPONSE/i)
+})
+
+test('preserves shared query validation before payment processing', async () => {
+  for (const query of ['', 'x'.repeat(257), '\u0000']) {
+    const response = await fetch(`${baseUrl}/api/search?q=${encodeURIComponent(query)}`)
+    assert.equal(response.status, 400)
+  }
+  assert.equal(verifyBodies.length, 0)
+  assert.equal(serperCalls, 0)
+})
+
+test('preserves shared query sanitization and invocation metrics on paid responses', async () => {
+  verifyValid = true
+  const response = await fetch(`${baseUrl}/api/search?q=${encodeURIComponent(' stel\u0000lar ')}`, {
+    headers: { 'payment-signature': paymentHeader() },
+  })
+  assert.equal(response.status, 200)
+  const body = await response.json() as {
+    query: string; invocationType: string; warmHandlerLatencyMs: number; coldStartLatencyMs: null
+  }
+  assert.equal(body.query, 'stellar')
+  assert.equal(body.invocationType, 'warm')
+  assert.equal(body.coldStartLatencyMs, null)
+  assert.ok(body.warmHandlerLatencyMs >= 0)
+  assert.equal(settleBodies.length, 1)
 })
 
 test('withholds search results when settlement fails', async () => {

@@ -1,5 +1,10 @@
-import { describe, expect, it, vi, afterEach } from 'vitest'
-import { buildCorsOptions, getCorsStartupMessage, isProductionEnv, parseAllowedOrigins } from './corsConfig.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  buildCorsOptions,
+  getCorsStartupMessage,
+  isProductionEnv,
+  parseAllowedOrigins,
+} from './corsConfig'
 
 describe('parseAllowedOrigins', () => {
   it('returns an empty array for undefined input', () => {
